@@ -18,10 +18,10 @@
 import json
 import os
 import pickle
+
 from absl import logging
 import ml_collections
 import numpy as np
-
 import utils
 import vocab
 from architectures.transformers import top_logits
@@ -29,8 +29,8 @@ from data import data_utils
 from metrics import coco_metrics
 from tasks import task as task_lib
 from tasks import task_utils
+from tasks.visualization import vis_utils
 import tensorflow as tf
-from tensorflow_models.object_detection.utils import visualization_utils
 
 
 @task_lib.TaskRegistry.register('object_detection')
@@ -184,7 +184,7 @@ class TaskObjectDetection(task_lib.Task):
         top_k=config.top_k, top_p=config.top_p, sampling_callback=callback)
     # if True:  # Sanity check by using gt response_seq as pred_seq.
     #   pred_seq = preprocessed_outputs[1]
-    #   logits = tf.one_hot(pred_seq, self.vocab_size)
+    #   logits = tf.one_hot(pred_seq, mconfig.vocab_size)
     return examples, pred_seq, logits
 
   def postprocess_tpu(self, batched_examples, pred_seq, logits, training=False):
@@ -381,7 +381,7 @@ def add_image_summary_with_bbox(images, bboxes, classes, scores, category_names,
   for image_, boxes_, scores_, classes_, image_id_ in zip(
       images, bboxes, scores, classes, image_ids):
     keep_indices = np.where(classes_ > 0)[0]
-    image = visualization_utils.visualize_boxes_and_labels_on_image_array(
+    image = vis_utils.visualize_boxes_and_labels_on_image_array(
         image=image_,
         boxes=boxes_[keep_indices],
         classes=classes_[keep_indices],

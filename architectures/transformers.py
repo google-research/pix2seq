@@ -256,13 +256,13 @@ def top_logits(logits: tf.Tensor,
   """Remove low probability logits via masking.
 
   Args:
-    logits: `tensor` of shape (batch size, total_classes).
-    k: `int` specifying top k largest logits to keep.
-    p: `float` specifying a probability for finding a minimum set of largest
+    logits: class logits in shape of (batch size, total_classes).
+    k: specifying top k largest logits to keep.
+    p: specifying a probability for finding a minimum set of largest
       logits to keep, where their cumulative probability is no less than p
       (actually in the following version, it is "...cumulative probability is
       the largest but no more than p").
-    mask: `float` value that's used to replace logits that don't satisfy the
+    mask: an value that's used to replace logits that don't satisfy the
       keep conditions.
 
   Returns:

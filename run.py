@@ -31,7 +31,6 @@ from data import coco  # pylint: disable=unused-import
 from data import dataset as dataset_lib
 from models import ar_model  # pylint: disable=unused-import
 from models import model as model_lib
-from models import model_utils
 # pylint: disable=unused-import
 from tasks import object_detection
 # pylint: enable=unused-import
@@ -87,20 +86,14 @@ def get_task_and_dataset(config: ml_collections.ConfigDict):
   return task, dataset
 
 
-def get_model_and_trainer(config: ml_collections.ConfigDict):
-  model = model_lib.ModelRegistry.lookup(config.model.name)(config)
-  trainer = model_lib.TrainerRegistry.lookup(config.model.name)(config)
-  return model, trainer
-
-
-def perform_evaluation(config, model, dataset, task, eval_steps, ckpt,
-                       strategy):
+def perform_evaluation(config, dataset, task, eval_steps, ckpt, strategy):
   """Perform evaluation."""
   eval_tag = config.eval.tag
   summary_writer = tf.summary.create_file_writer(FLAGS.model_dir)
 
   with strategy.scope():
-    # Restore checkpoint.
+    # Restore model checkpoint.
+    model = model_lib.ModelRegistry.lookup(config.model.name)(config)
     logging.info('Restoring from %s', ckpt)
     checkpoint = tf.train.Checkpoint(
         model=model, global_step=tf.Variable(0, dtype=tf.int64))
@@ -173,99 +166,33 @@ def perform_evaluation(config, model, dataset, task, eval_steps, ckpt,
   return result
 
 
-def perform_training(config, trainer, model, datasets, tasks, train_steps,
-                     steps_per_loop, num_train_examples, strategy):
+def perform_training(config, datasets, tasks, train_steps, steps_per_loop,
+                     num_train_examples, strategy):
   """Main training logic."""
   with strategy.scope():
-    # Build LR schedule and optimizer.
-    c_opt = config.optimization
-    batch_size = config.train.batch_size
-    end_lr_factor = c_opt.end_lr_factor if 'end_lr_factor' in c_opt else 0.
-    warmup_steps = c_opt.warmup_steps or int(
-        round(c_opt.warmup_epochs * num_train_examples // batch_size))
-    learning_rate = model_utils.WarmUpAndDecay(
-        c_opt.learning_rate, c_opt.learning_rate_scaling, batch_size,
-        c_opt.learning_rate_schedule, warmup_steps, train_steps, end_lr_factor)
-    optimizer = model_utils.build_optimizer(config.optimization, learning_rate)
+    # Setup training elements.
+    trainer = model_lib.TrainerRegistry.lookup(config.model.name)(
+        config, model_dir=FLAGS.model_dir,
+        num_train_examples=num_train_examples, train_steps=train_steps)
+    data_iterators = [iter(dataset) for dataset in datasets]
+    summary_writer = tf.summary.create_file_writer(FLAGS.model_dir)
 
-    latest_ckpt, checkpoint, verify_restored = utils.restore_from_checkpoint(
-        FLAGS.model_dir, False,
-        model=model, global_step=optimizer.iterations, optimizer=optimizer)
-    verify_restored_p = None
-    if not latest_ckpt:
-      if config.model.pretrained_ckpt:
-        _, _, verify_restored_p = utils.restore_from_checkpoint(
-            config.model.pretrained_ckpt, True, model=model)
-
-  def train_step(examples, task):
-    preprocessed_outputs = task.preprocess_batched(examples, training=True)
-    with tf.GradientTape() as tape:
-      loss = trainer.compute_loss(model, preprocessed_outputs)
-      loss = loss / strategy.num_replicas_in_sync  # for mean gradient.
-      loss *= task.config.task.weight
-      total_num_params = utils.count_params(model, verbose=True)
-      trainable_variables = model.trainable_variables
-      grads = tape.gradient(loss, trainable_variables)
-      optimizer.apply_gradients(zip(grads, trainable_variables))
-      trainer.update_metrics_with_stats(
-          {'total_num_params': total_num_params,
-           'grads': grads,
-           'num_replicas_in_sync': strategy.num_replicas_in_sync,
-           'weights': trainable_variables,
-           f'loss_{task.config.task.name}': loss})
-
-  def train_step_joint(examples, tasks):
-    preprocessed_outputs = [
-        t.preprocess_batched(e, training=True) for e, t in zip(examples, tasks)]
-    loss_metrics = {}
-    with tf.GradientTape() as tape:
-      loss = 0
-      for o, task in zip(preprocessed_outputs, tasks):
-        loss_t = trainer.compute_loss(model, o)
-        loss_t = loss_t / strategy.num_replicas_in_sync  # for mean gradient.
-        loss_t *= task.config.task.weight
-        loss += loss_t
-        loss_metrics[f'loss_{task.config.task.name}'] = loss_t
-      total_num_params = utils.count_params(model, verbose=True)
-      trainable_variables = model.trainable_variables
-      grads = tape.gradient(loss, trainable_variables)
-      optimizer.apply_gradients(zip(grads, trainable_variables))
-      trainer.update_metrics_with_stats(loss_metrics)
-      trainer.update_metrics_with_stats(
-          {'total_num_params': total_num_params,
-           'grads': grads,
-           'num_replicas_in_sync': strategy.num_replicas_in_sync,
-           'weights': trainable_variables})
-
-  summary_writer = tf.summary.create_file_writer(FLAGS.model_dir)
-  with strategy.scope():
     @tf.function
-    def train_multiple_steps(iterators, tasks):
+    def train_multiple_steps(data_iterators, tasks):
+      train_step = lambda xs, ts=tasks: trainer.train_step(xs, ts, strategy)
       for _ in tf.range(steps_per_loop):  # using tf.range prevents unroll.
         with tf.name_scope(''):  # prevent `while_` prefix for variable names.
-          if config.train.get('joint_update'):
-            examples = [next(it) for it in iterators]
-            strategy.run(lambda xs, ts=tasks: train_step_joint(xs, ts),
-                         (examples,))
-          else:
-            for iterator, task in zip(iterators, tasks):
-              examples = next(iterator)
-              strategy.run(lambda x, t=task: train_step(x, t), (examples,))
+          strategy.run(train_step, ([next(it) for it in data_iterators],))
 
-    global_step = optimizer.iterations
+    global_step = trainer.optimizer.iterations
     cur_step = global_step.numpy()
-    iterators = [iter(dataset) for dataset in datasets]
     timestamp = time.time()
-    checkpoint_manager = tf.train.CheckpointManager(
-        checkpoint, FLAGS.model_dir, config.train.keep_checkpoint_max)
     while cur_step < train_steps:
       with summary_writer.as_default():
-        train_multiple_steps(iterators, tasks)
-        (verify_restored,), (verify_restored_p,) = (
-            utils.check_checkpoint_restored(
-                [verify_restored], [verify_restored_p]))
+        train_multiple_steps(data_iterators, tasks)
+        trainer.check_checkpoint_restored()
         cur_step = global_step.numpy()
-        checkpoint_manager.save(cur_step)
+        trainer.checkpoint_manager.save(cur_step)
         logging.info('Completed: %d / %d steps', cur_step, train_steps)
         duration = time.time() - timestamp
         timestamp = time.time()
@@ -276,7 +203,7 @@ def perform_training(config, trainer, model, datasets, tasks, train_steps,
                 metric_name, metric_val.result().numpy(), global_step)
           tf.summary.scalar(
               'learning_rate',
-              learning_rate(tf.cast(global_step, dtype=tf.float32)),
+              trainer.learning_rate(tf.cast(global_step, dtype=tf.float32)),
               global_step)
           tf.summary.scalar(
               'steps_per_sec',
@@ -299,8 +226,6 @@ def main(unused_argv):
   config.training = training
 
   with strategy.scope():
-    model, trainer = get_model_and_trainer(config)
-
     if 'tasks' not in config:
       config.tasks = [config.task]
     dses = []
@@ -330,23 +255,20 @@ def main(unused_argv):
     checkpoint_steps = min(checkpoint_steps, train_steps)
 
   if training:
-    perform_training(
-        config, trainer, model, dses, tasks, train_steps, checkpoint_steps,
-        dataset.num_train_examples, strategy)
+    perform_training(config, dses, tasks, train_steps, checkpoint_steps,
+                     dataset.num_train_examples, strategy)
   else:
     checkpoint_dir = config.eval.get('checkpoint_dir', None)
     if not checkpoint_dir:
       checkpoint_dir = FLAGS.model_dir
     for ckpt in tf.train.checkpoints_iterator(
         checkpoint_dir, min_interval_secs=15):
-      result = perform_evaluation(
-          config, model, ds, task, eval_steps, ckpt, strategy)
+      result = perform_evaluation(config, ds, task, eval_steps, ckpt, strategy)
       if result['global_step'] >= train_steps:
         logging.info('Eval complete. Exiting...')
         break
 
 
 if __name__ == '__main__':
-  tf.compat.v1.enable_v2_behavior()
   tf.config.set_soft_device_placement(True)
   app.run(main)

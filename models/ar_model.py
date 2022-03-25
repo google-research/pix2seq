@@ -160,29 +160,26 @@ class Model(tf.keras.models.Model):
 
 
 @model_lib.TrainerRegistry.register('encoder_ar_decoder')
-class ARTrainer(object):
+class ARTrainer(model_lib.Trainer):
   """A trainer for AR model."""
 
-  def __init__(self, config: ml_collections.ConfigDict):
-    self.config = config
-    self._metrics = {
-        'total_num_params': tf.keras.metrics.Mean('total_num_params'),
-        'grad_global_norm': tf.keras.metrics.Mean('grad_global_norm'),
-        'weight_linf_norm': tf.keras.metrics.Mean('weight_linf_norm'),
-        'loss': tf.keras.metrics.Mean('loss'),
+  def __init__(self, config: ml_collections.ConfigDict, **kwargs):
+    """Init and setup basic training elements under strategy scope.
+
+    Note: the trainer needs to be created under `strategy.scope()`.
+
+    Args:
+      config: object for holding hyperparameters and other configurations.
+      **kwargs: other neccesary configurations to pass for training setup.
+    """
+    super().__init__(config, **kwargs)
+    self._metrics.update({
         'loss_notpad': tf.keras.metrics.Mean('loss_notpad'),
         'accuracy_notpad': tf.keras.metrics.SparseCategoricalAccuracy(
             'accuracy_notpad'),
-    }
-    self._metrics.update({
-        f'loss_{t.name}': tf.keras.metrics.Mean(f'loss_{t.name}')
-        for t in config.tasks})
+    })
 
-  @property
-  def metrics(self):
-    return self._metrics
-
-  def compute_loss(self, model, preprocess_outputs):
+  def compute_loss(self, preprocess_outputs):
     """Compute loss based on model outputs and targets."""
     image, input_seq, target_seq, token_weights = preprocess_outputs
 
@@ -193,7 +190,7 @@ class ARTrainer(object):
     token_weights_notpad = tf.where(
         is_padding, tf.zeros_like(token_weights), token_weights)
 
-    logits = model(image, input_seq)
+    logits = self.model(image, input_seq)
     losses = model_utils.get_loss(
         logits, target_seq, self.config.train.loss_type)
     loss = tf.reduce_sum(losses * token_weights) / (
@@ -209,29 +206,3 @@ class ARTrainer(object):
         tf.boolean_mask(logits, tf.greater(token_weights_notpad, 0)))
 
     return loss
-
-  def update_metrics_with_stats(self, stats_dict):
-    """Update metrics using stats such as grads and vars after step update."""
-    if 'total_num_params' in stats_dict:
-      self._metrics['total_num_params'].update_state(
-          stats_dict['total_num_params'])
-    if 'grads' in stats_dict:
-      if 'num_replicas_in_sync' in stats_dict:
-        # Estimate using gradient from a single replica.
-        scalar_m = stats_dict['num_replicas_in_sync']
-      else:
-        scalar_m = 1.
-      self._metrics['grad_global_norm'].update_state(tf.linalg.global_norm(
-          [tf.math.scalar_mul(
-              scalar_m, g) for g in stats_dict['grads'] if g is not None]))
-    if 'weights' in stats_dict:
-      wmx = [tf.reduce_max(tf.math.abs(m)) for m in stats_dict['weights']]
-      self._metrics['weight_linf_norm'].update_state(tf.reduce_max(wmx))
-
-    for k, v in stats_dict.items():
-      if k.startswith('loss_'):
-        self._metrics[k].update_state(v)
-
-  def reset(self):
-    for k, _ in self._metrics.items():
-      self._metrics[k].reset_states()
