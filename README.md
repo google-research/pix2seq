@@ -57,7 +57,7 @@ Step 1: check and update configurations in configs/config_det_finetune.py, such 
 
 Step 2: run `python3 run.py --mode=train --model_dir=/tmp/model_dir --config=configs/config_det_finetune.py --config.dataset.coco_annotations_dir=/path/to/annotations --config.train.batch_size=32 --config.train.epochs=20 --config.optimization.learning_rate=3e-5`.
 
-**Note: we are experiencing long compilation time before training starts when using multiple GPUs, which shouldn't be an issue with single GPU or multiple TPUs.**
+**Note: please be advised that training with multiple GPUs may experience some issues such as slow down in building the graph, which shouldn't be an issue with single GPU or multiple TPUs. We are working on a fix and will update soon.**
 
 ## Instructions for evaluation of object detection models.
 
