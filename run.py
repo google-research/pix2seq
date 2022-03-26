@@ -63,22 +63,6 @@ flags.DEFINE_string('config_override', None,
 FLAGS = flags.FLAGS
 
 
-def get_config():
-  """Get the config."""
-  config = FLAGS.config
-  config = utils.update_config_from_string(config, FLAGS.config_override)
-  logging.info('Config: %s', config)
-
-  # Log config to the model directory for training jobs.
-  config_filepath = os.path.join(FLAGS.model_dir, 'config.json')
-  if FLAGS.mode == TRAIN and not tf.io.gfile.exists(config_filepath):
-    tf.io.gfile.makedirs(FLAGS.model_dir)
-    with tf.io.gfile.GFile(config_filepath, 'w') as f:
-      f.write(config.to_json(indent=2, sort_keys=True))
-
-  return config
-
-
 def get_task_and_dataset(config: ml_collections.ConfigDict):
   """Returns `Task` class instance and `Dataset` class instance."""
   task = task_lib.TaskRegistry.lookup(config.task.name)(config)
@@ -116,10 +100,10 @@ def perform_evaluation(config, dataset, task, eval_steps, ckpt, strategy):
       return outputs
 
     iterator = iter(dataset)
-    timestamp = time.time()
-    i = 0
+    start_time = timestamp = time.time()
+    cur_step = 0
     while True:
-      if eval_steps and i >= eval_steps:
+      if eval_steps and cur_step >= eval_steps:
         break
       try:
         with summary_writer.as_default():
@@ -127,18 +111,22 @@ def perform_evaluation(config, dataset, task, eval_steps, ckpt, strategy):
           task.postprocess_cpu(
               per_step_outputs,
               train_step=global_step.numpy(),
-              eval_step=i,
+              eval_step=cur_step,
               summary_tag=eval_tag)
-        i += 1
+        cur_step += 1
         if eval_steps:
-          logging.info('Completed eval for %d / %d steps', i, eval_steps)
+          steps_per_sec = 1. / (time.time() - timestamp)
+          timestamp = time.time()
+          progress = cur_step / float(eval_steps) * 100
+          eta = (eval_steps -  cur_step) / steps_per_sec / 60.
+          logging.info('Completed: {} / {} steps ({:.2f}%), ETA {:.2f} mins'
+                       ''.format(cur_step, eval_steps, progress, eta))
         else:
-          logging.info('Completed eval for %d steps', i)
+          logging.info('Completed: %d steps', cur_step)
       except tf.errors.OutOfRangeError:
         logging.info('Break due to OutOfRangeError exception')
         break
-    eval_duration = time.time() - timestamp
-    logging.info('Finished eval in %.2f sec', eval_duration)
+    logging.info('Finished eval in %.2f mins', (time.time() - start_time) / 60.)
 
   # Write summaries and record results as JSON.
   cur_step = global_step.numpy()
@@ -153,15 +141,6 @@ def perform_evaluation(config, dataset, task, eval_steps, ckpt, strategy):
       FLAGS.model_dir, eval_tag + 'result_%d.json' % result['global_step'])
   with tf.io.gfile.GFile(result_json_path, 'w') as f:
     json.dump({k: float(v) for k, v in result.items()}, f)
-  flag_json_path = os.path.join(FLAGS.model_dir, eval_tag + 'flags.json')
-  with tf.io.gfile.GFile(flag_json_path, 'w') as f:
-    serializable_flags = {}
-    for key, val in FLAGS.flag_values_dict().items():
-      # Some flag value types e.g. datetime.timedelta are not json serializable,
-      # filter those out.
-      if utils.json_serializable(val):
-        serializable_flags[key] = val
-    json.dump(serializable_flags, f)
 
   return result
 
@@ -193,10 +172,8 @@ def perform_training(config, datasets, tasks, train_steps, steps_per_loop,
         trainer.check_checkpoint_restored()
         cur_step = global_step.numpy()
         trainer.checkpoint_manager.save(cur_step)
-        logging.info('Completed: %d / %d steps', cur_step, train_steps)
-        duration = time.time() - timestamp
+        steps_per_sec = steps_per_loop / (time.time() - timestamp)
         timestamp = time.time()
-        steps_per_sec = steps_per_loop / duration
         with tf.name_scope('train'):
           for metric_name, metric_val in trainer.metrics.items():
             tf.summary.scalar(
@@ -210,7 +187,10 @@ def perform_training(config, datasets, tasks, train_steps, steps_per_loop,
               steps_per_sec,
               global_step)
         summary_writer.flush()
-
+      progress = cur_step / float(train_steps) * 100
+      eta = (train_steps -  cur_step) / steps_per_sec / 60.
+      logging.info('Completed: {} / {} steps ({:.2f}%), ETA {:.2f} mins'.format(
+          cur_step, train_steps, progress, eta))
       trainer.reset()
     logging.info('Training complete...')
 
@@ -221,8 +201,8 @@ def main(unused_argv):
 
 
   training = FLAGS.mode == TRAIN
-  config = get_config()
-  config.model_dir = FLAGS.model_dir
+  config = utils.get_and_log_config(
+      FLAGS.config, FLAGS.config_override, FLAGS.model_dir, training)
   config.training = training
 
   with strategy.scope():

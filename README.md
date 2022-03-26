@@ -2,7 +2,10 @@
 
 ![pix2seq](pix2seq.png)
 
-## Objects365 object detection pretrained checkpoints
+## Models
+<a href="https://colab.research.google.com/github/google-research/pix2seq/blob/master/colabs/pix2seq_inference_object_detection.ipynb" target="_parent"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>
+
+### Objects365 object detection pretrained checkpoints
 
 Backbone       | Total params (M) | Image size | Google cloud storage location
 -------------: | ---------------: | ---------: | -----------:
@@ -12,7 +15,7 @@ ViT-L          | 115.2            | 640x640    | [gs://pix2seq/obj365_pretrain/v
 ViT-B          | 341.2            | 640x640    | [gs://pix2seq/obj365_pretrain/vit_l_640x640_b256_s400k](https://console.cloud.google.com/storage/browser/pix2seq/obj365_pretrain/vit_l_640x640_b256_s400k)
 
 
-## COCO object detection fine-tuned checkpoints
+### COCO object detection fine-tuned checkpoints
 
 Backbone       | Total params (M) | Image size | COCO AP   | Google cloud storage location
 -------------: | ---------------: | ---------: | --------: | -----------:
@@ -29,12 +32,15 @@ ViT-L          | 341.2            | 640x640    | 47.6      | [gs://pix2seq/coco_
 ViT-L          | 341.2            | 1024x1024  | 49.2      | [gs://pix2seq/coco_det_finetune/vit_l_1024x1024](https://console.cloud.google.com/storage/browser/pix2seq/coco_det_finetune/vit_l_1024x1024)
 ViT-L          | 341.2            | 1333x1333  | 50.0      | [gs://pix2seq/coco_det_finetune/vit_l_1333x1333](https://console.cloud.google.com/storage/browser/pix2seq/coco_det_finetune/vit_l_1333x1333)
 
-## Colabs
 
-TO be added.
+## Usage
+
+### Colabs
+
+See [colabs](colabs) for inference and fine-tuning (to be added soon) demos.
 
 
-## Basic setup before running the code
+### Basic setup before running the code
 
 The following setup is required before running the code.
 ```
@@ -48,8 +54,11 @@ wget -c http://images.cocodataset.org/annotations/annotations_trainval2017.zip
 unzip annotations_trainval2017.zip
 ```
 
+(Optional) If accessing the pretrained checkpoints in cloud slows down the start of training/eval, you can download them mannually with following command `gsutil cp -r gs://folder .`.
 
-## Instructions for training (fine-tuning) of objedct detection models.
+(Optional) If training doesn't start (due to NcclAllReduce error) or starts very slowly (due to graph building), try a different `cross_device_ops` for `tf.distribute.MirroredStrategy` in utils.py:build_strategy function.
+
+### Instructions for training (fine-tuning) of objedct detection models.
 
 Below is the instruction for starting a training job, where we've set up a configuration mainly for fine-tuning the objects365 pretrained models.
 
@@ -57,15 +66,18 @@ Step 1: check and update configurations in configs/config_det_finetune.py, such 
 
 Step 2: run `python3 run.py --mode=train --model_dir=/tmp/model_dir --config=configs/config_det_finetune.py --config.dataset.coco_annotations_dir=/path/to/annotations --config.train.batch_size=32 --config.train.epochs=20 --config.optimization.learning_rate=3e-5`.
 
-**Note: please be advised that training with multiple GPUs may experience some issues such as slow down in building the graph, which shouldn't be an issue with single GPU or multiple TPUs. We are working on a fix and will update soon.**
+(Optional) Setup tensorboard for training curves with `tensorboard --logidr=/tmp/model_dir`.
 
-## Instructions for evaluation of object detection models.
+
+### Instructions for evaluation of object detection models.
 
 Below is the instruction for starting an evaluation job, which monitors the specified directory and perform evaluation for latest and un-evaluated checkpoints. It can be started in parallel to or after the training.
 
 Step 1: check and update configurations in configs/config_det_finetune.py, such as `encoder_variant`, `image_size`. Set `checkpoint_dir` if neccesary (e.g., evaluating our provided fine-tuning checkpoints).
 
 Step 2: run `python3 run.py --mode=eval --model_dir=/tmp/model_dir --config=configs/config_det_finetune.py --config.dataset.coco_annotations_dir=/path/to/annotations --config.eval.batch_size=40`.
+
+(Optional) Setup tensorboard for eval curves and detection visualizations with `tensorboard --logidr=/tmp/model_dir`.
 
 
 ## Cite

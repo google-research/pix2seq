@@ -164,25 +164,19 @@ class TaskObjectDetection(task_lib.Task):
     if training:
       return features['image'], input_seq, target_seq, token_weights
     else:
-      return features['image'], target_seq, batched_examples
+      return features['image'], response_seq, batched_examples
 
   def infer(self, model, preprocessed_outputs):
     """Perform inference given the model and preprocessed outputs."""
-    # config = self.config.task
-    image, target_seq, examples = preprocessed_outputs  # response_seq unused by default
-    d_outs = model.infer(
-        image, iterations=mconfig.iterations, target=target_seq)
-    pred_seq, logits = d_outs['pred_seq'], d_outs['logits']
-    # bsz = tf.shape(image)[0]
-    # prompt_seq = task_lib.build_prompt_seq_from_task_id(
-    #     self.task_type, prompt_shape=(bsz, 1))
-    # c_sampl = config.custom_sampling if 'custom_sampling' in config else False
-    # callback = get_sampling_callback(mconfig) if c_sampl else None
-    # pred_seq, logits, _ = model.infer(
-    #     image, prompt_seq, encoded=None,
-    #     max_seq_len=config.max_instances_per_image_test * 5,
-    #     temperature=config.temperature,
-    #     top_k=config.top_k, top_p=config.top_p, sampling_callback=callback)
+    config = self.config.task
+    image, _, examples = preprocessed_outputs  # response_seq unused by default
+    bsz = tf.shape(image)[0]
+    prompt_seq = task_utils.build_prompt_seq_from_task_id(
+        self.task_vocab_id, prompt_shape=(bsz, 1))
+    pred_seq, logits, _ = model.infer(
+        image, prompt_seq, encoded=None,
+        max_seq_len=config.max_instances_per_image_test * 5,
+        temperature=config.temperature, top_k=config.top_k, top_p=config.top_p)
     # if True:  # Sanity check by using gt response_seq as pred_seq.
     #   pred_seq = preprocessed_outputs[1]
     #   logits = tf.one_hot(pred_seq, mconfig.vocab_size)

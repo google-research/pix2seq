@@ -21,6 +21,7 @@ import json
 import logging
 import math
 import operator
+import os
 import matplotlib
 import matplotlib.cm
 import ml_collections
@@ -230,9 +231,13 @@ def build_strategy(use_tpu, master):
     logging.info('num_tasks: %d', topology.num_tasks)
     logging.info('num_tpus_per_task: %d', topology.num_tpus_per_task)
     strategy = tf.distribute.TPUStrategy(cluster)
-  else:
-    # For (multiple) GPUs.
-    strategy = tf.distribute.MirroredStrategy()
+  else:  # For (multiple) GPUs.
+    cross_device_ops = None  # tf.distribute.NcclAllReduce() by default
+    # if the default cross_device_ops fails, try either of the following two
+    # by uncommenting it.
+    # cross_device_ops = tf.distribute.HierarchicalCopyAllReduce()
+    # cross_device_ops = tf.distribute.ReductionToOneDevice()
+    strategy = tf.distribute.MirroredStrategy(cross_device_ops=cross_device_ops)
     logging.info('Running using MirroredStrategy on %d replicas',
                  strategy.num_replicas_in_sync)
   return strategy
@@ -289,6 +294,22 @@ def merge_list_of_dict(list_of_dict):
   for key in list_of_dict[0].keys():
     dict_new[key] = tf.stack([x[key] for x in list_of_dict])
   return dict_new
+
+
+def get_and_log_config(config, config_override, model_dir, training):
+  """Get the config and log it."""
+  config = update_config_from_string(config, config_override)
+  config.model_dir = model_dir
+  logging.info('Config: %s', config)
+
+  # Log config to the model directory for training jobs.
+  config_filepath = os.path.join(model_dir, 'config.json')
+  if training and not tf.io.gfile.exists(config_filepath):
+    tf.io.gfile.makedirs(model_dir)
+    with tf.io.gfile.GFile(config_filepath, 'w') as f:
+      f.write(config.to_json(indent=2, sort_keys=True))
+
+  return config
 
 
 def update_config_from_flattened_key(config, key, value):
