@@ -61,7 +61,6 @@ def get_config(config_str=None):
           # noise_bbox_weight=0.0,
           # eos_token_weight=0.1,
           class_label_corruption='rand_n_fake_cls',
-          custom_sampling=False,
           top_k=0,
           top_p=0.4,
           temperature=1.0,

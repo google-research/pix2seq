@@ -24,7 +24,6 @@ import ml_collections
 import numpy as np
 import utils
 import vocab
-from architectures.transformers import top_logits
 from data import data_utils
 from metrics import coco_metrics
 from tasks import task as task_lib
@@ -165,23 +164,25 @@ class TaskObjectDetection(task_lib.Task):
     if training:
       return features['image'], input_seq, target_seq, token_weights
     else:
-      return features['image'], response_seq, batched_examples
+      return features['image'], target_seq, batched_examples
 
   def infer(self, model, preprocessed_outputs):
     """Perform inference given the model and preprocessed outputs."""
-    config = self.config.task
-    mconfig = self.config.model
-    image, _, examples = preprocessed_outputs  # response_seq unused by default
-    bsz = tf.shape(image)[0]
-    prompt_seq = task_utils.build_prompt_seq_from_task_id(
-        self.task_vocab_id, prompt_shape=(bsz, 1))
-    c_sampl = config.custom_sampling if 'custom_sampling' in config else False
-    callback = get_sampling_callback(mconfig) if c_sampl else None
-    pred_seq, logits, _ = model.infer(
-        image, prompt_seq, encoded=None,
-        max_seq_len=config.max_instances_per_image_test * 5,
-        temperature=config.temperature,
-        top_k=config.top_k, top_p=config.top_p, sampling_callback=callback)
+    # config = self.config.task
+    image, target_seq, examples = preprocessed_outputs  # response_seq unused by default
+    d_outs = model.infer(
+        image, iterations=mconfig.iterations, target=target_seq)
+    pred_seq, logits = d_outs['pred_seq'], d_outs['logits']
+    # bsz = tf.shape(image)[0]
+    # prompt_seq = task_lib.build_prompt_seq_from_task_id(
+    #     self.task_type, prompt_shape=(bsz, 1))
+    # c_sampl = config.custom_sampling if 'custom_sampling' in config else False
+    # callback = get_sampling_callback(mconfig) if c_sampl else None
+    # pred_seq, logits, _ = model.infer(
+    #     image, prompt_seq, encoded=None,
+    #     max_seq_len=config.max_instances_per_image_test * 5,
+    #     temperature=config.temperature,
+    #     top_k=config.top_k, top_p=config.top_p, sampling_callback=callback)
     # if True:  # Sanity check by using gt response_seq as pred_seq.
     #   pred_seq = preprocessed_outputs[1]
     #   logits = tf.one_hot(pred_seq, mconfig.vocab_size)
@@ -331,46 +332,6 @@ class TaskObjectDetection(task_lib.Task):
   def reset_metrics(self):
     """Reset states of metrics accumulators."""
     self._coco_metrics.reset_states()
-
-
-def get_sampling_callback(mconfig):
-  """Setup constrained sampling callback function."""
-  if 'text_vocab_shift' in mconfig:
-    text_vocab_shift = mconfig.text_vocab_shift
-  else:
-    text_vocab_shift = mconfig.vocab_size
-  size1 = vocab.BASE_VOCAB_SHIFT                              # reserved
-  size2 = mconfig.coord_vocab_shift - vocab.BASE_VOCAB_SHIFT  # class vocab
-  size3 = text_vocab_shift - mconfig.coord_vocab_shift           # coord vocab
-  size4 = mconfig.vocab_size - text_vocab_shift                  # text vocab
-  fake_cls_token = None  # vocab.FAKE_CLASS_TOKEN to overwrite cls prediction
-
-  def custom_sampling(next_logits, step, temperature, top_k, top_p, **kwargs):
-    """Sample only coordinate/class tokens at corresonding positions."""
-    large_neg = kwargs['large_neg'] if 'large_neg' in kwargs else -9e9
-    mask_cls = tf.concat([
-        tf.constant(large_neg, tf.float32, [size1]), tf.zeros(size2),
-        tf.constant(large_neg, tf.float32, [size3+size4])
-    ], 0)
-    mask_coord = tf.concat([
-        tf.constant(large_neg, tf.float32, [size1+size2]), tf.zeros([size3]),
-        tf.constant(large_neg, tf.float32, [size4])
-    ], 0)
-    next_logits = tf.cond(
-        tf.equal((step+1) % 5, 0),  # assuming yxyxc detection format.
-        lambda: next_logits + tf.expand_dims(mask_cls, 0),
-        lambda: next_logits + tf.expand_dims(mask_coord, 0))
-    sampling_logits = next_logits / tf.cast(temperature, tf.float32)
-    sampling_logits = top_logits(sampling_logits, k=top_k, p=top_p)
-    next_token = tf.random.categorical(
-        sampling_logits, num_samples=1, dtype=tf.int32)[:, 0]
-    if fake_cls_token is not None:  # replace next token with a fake_cls_token.
-      next_token = tf.cond(tf.equal((step+1) % 5, 0),
-                           lambda: next_token * 0 + fake_cls_token,
-                           lambda: next_token)
-    return next_token
-
-  return custom_sampling
 
 
 def add_image_summary_with_bbox(images, bboxes, classes, scores, category_names,
