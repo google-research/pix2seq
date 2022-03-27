@@ -2,6 +2,8 @@
 
 ![pix2seq](pix2seq.png)
 
+This is the *official* implementation of Pix2Seq in Tensorflow 2 with efficient TPUs/GPUs support as well as interactive debugging similar to Pytorch.
+
 ## Models
 <a href="https://colab.research.google.com/github/google-research/pix2seq/blob/master/colabs/pix2seq_inference_object_detection.ipynb" target="_parent"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>
 
@@ -37,7 +39,7 @@ ViT-L          | 341.2            | 1333x1333  | 50.0      | [gs://pix2seq/coco_
 
 ### Colabs
 
-See [colabs](colabs) for inference and fine-tuning (to be added soon) demos.
+See [colabs](colabs) for inference and fine-tuning demos.
 
 
 ### Basic setup before running the code
@@ -62,18 +64,19 @@ unzip annotations_trainval2017.zip
 
 Below is the instruction for starting a training job, where we've set up a configuration mainly for fine-tuning the objects365 pretrained models.
 
-Step 1: check and update configurations in configs/config_det_finetune.py, such as `encoder_variant`, `image_size`.
+Step 1: check [config_det_finetune.py](configs/config_det_finetune.py) and update if neccesary, such as `encoder_variant`, `image_size`.
 
 Step 2: run `python3 run.py --mode=train --model_dir=/tmp/model_dir --config=configs/config_det_finetune.py --config.dataset.coco_annotations_dir=/path/to/annotations --config.train.batch_size=32 --config.train.epochs=20 --config.optimization.learning_rate=3e-5`.
 
-(Optional) Setup tensorboard for training curves with `tensorboard --logidr=/tmp/model_dir`.
+(Optional) Setup tensorboard for training curves with `tensorboard --logidr=/tmp/model_dir`. Note: eval on this drill fine-tuning run (with vit-b 640x640 and 20 epochs) should give ~43.5 AP. Exact configurations used to reproduce the COCO fine-tuning results can be found in gs://pix2seq/coco_det_finetune.
 
+(Optional) Set `--run_eagerly=True` for interactive debuging (which will be slower).
 
 ### Instructions for evaluation of object detection models.
 
 Below is the instruction for starting an evaluation job, which monitors the specified directory and perform evaluation for latest and un-evaluated checkpoints. It can be started in parallel to or after the training.
 
-Step 1: check and update configurations in configs/config_det_finetune.py, such as `encoder_variant`, `image_size`. Set `checkpoint_dir` if neccesary (e.g., evaluating our provided fine-tuning checkpoints).
+Step 1: check [config_det_finetune.py](configs/config_det_finetune.py) and update if neccesary, such as `encoder_variant`, `image_size`. Set `checkpoint_dir` if neccesary (e.g., for evaluating our provided fine-tuning checkpoints).
 
 Step 2: run `python3 run.py --mode=eval --model_dir=/tmp/model_dir --config=configs/config_det_finetune.py --config.dataset.coco_annotations_dir=/path/to/annotations --config.eval.batch_size=40`.
 

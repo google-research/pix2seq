@@ -253,7 +253,7 @@ def get_train_steps(dataset, train_steps, train_epochs, train_batch_size):
 def get_eval_steps(dataset, eval_steps, eval_batch_size):
   """Determine the number of eval steps."""
   num_eval_examples = dataset.num_eval_examples
-  if num_eval_examples % eval_batch_size != 0:
+  if not eval_steps and num_eval_examples % eval_batch_size != 0:
     raise ValueError('Only divisible eval batch sizes are currently supported.')
   # TODO(b/181662974): Revert this and support non-even batch sizes.
   # return eval_steps or int(
@@ -296,9 +296,8 @@ def merge_list_of_dict(list_of_dict):
   return dict_new
 
 
-def get_and_log_config(config, config_override, model_dir, training):
+def get_and_log_config(config, model_dir, training):
   """Get the config and log it."""
-  config = update_config_from_string(config, config_override)
   config.model_dir = model_dir
   logging.info('Config: %s', config)
 
@@ -309,70 +308,6 @@ def get_and_log_config(config, config_override, model_dir, training):
     with tf.io.gfile.GFile(config_filepath, 'w') as f:
       f.write(config.to_json(indent=2, sort_keys=True))
 
-  return config
-
-
-def update_config_from_flattened_key(config, key, value):
-
-  def is_float(v) -> bool:
-    try:
-      float(v)
-      return True
-    except ValueError:
-      return False
-
-  def is_int(v) -> bool:
-    try:
-      int(v)
-      return True
-    except ValueError:
-      return False
-
-  def to_bool(v) -> bool:
-    if v == 'True' or v == 'true':
-      return True
-    elif v == 'False' or v == 'false':
-      return False
-    else:
-      raise ValueError()
-
-  config = copy.deepcopy(config)
-  k_list = key.split('.', 1)
-  k = k_list[0]
-  if is_int(k):
-    k = int(k)
-
-  if len(k_list) > 1:
-    config[k] = update_config_from_flattened_key(config[k], k_list[1], value)
-  else:
-    if k in config and isinstance(config.get(k), bool):
-      value = to_bool(value)
-    elif config.get(k) is not None:
-      value = type(config.get(k))(value)
-    elif is_int(value):
-      value = int(value)
-    elif is_float(value):
-      value = float(value)
-    config.update_from_flattened_dict({k: value})
-  return config
-
-
-def update_config_from_string(config: ml_collections.ConfigDict,
-                              config_override: str):
-  """Update a config from a string such as 'a=3,b=foo'.
-
-  Args:
-    config: a ml_collections config dict.
-    config_override: a string in the format of 'k1=v1,k2=v2'. The keys can be
-      flattened keys such as 'a.b.c', or for list items, 'd.0.e' etc.
-
-  Returns:
-    The updated config.
-  """
-  if config_override:
-    for o in config_override.split(','):
-      k, v = o.split('=')
-      config = update_config_from_flattened_key(config, k, v)
   return config
 
 

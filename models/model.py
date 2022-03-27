@@ -97,15 +97,15 @@ class Trainer(abc.ABC):
       loss = 0
       for o, task in zip(preprocessed_outputs, tasks):
         loss_t = self.compute_loss(o)
-        loss_t = loss_t / strategy.num_replicas_in_sync  # for mean gradient.
-        loss_t *= task.config.task.weight
-        loss += loss_t
         task_loss_metrics[f'loss_{task.config.task.name}'] = loss_t
+        loss += loss_t * task.config.task.weight
       trainable_variables = self._model.trainable_variables
-      grads = tape.gradient(loss, trainable_variables)
+      grads = tape.gradient(  # div by num_replicas_in_sync for mean gradient.
+          loss / strategy.num_replicas_in_sync, trainable_variables)
       self._optimizer.apply_gradients(zip(grads, trainable_variables))
 
     # Update metrics.
+    self._metrics['loss'].update_state(loss)
     for k, v in task_loss_metrics.items():
       self._metrics[k].update_state(v)
     self._metrics['total_num_params'].update_state(

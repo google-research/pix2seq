@@ -50,15 +50,12 @@ flags.DEFINE_bool('use_tpu', False,
 flags.DEFINE_string('master', None,
                     'Address/name of the TensorFlow master to use.')
 flags.DEFINE_bool('run_eagerly', False,
-                  'Whether to run tf.function eagerly.')
+                  'Whether to run eagerly (for interactive debugging).')
 flags.mark_flag_as_required('model_dir')
 
 config_flags.DEFINE_config_file(
     'config', 'path/to/config/file.py',
     'The config file.', lock_config=False)
-
-flags.DEFINE_string('config_override', None,
-                    'Override config fields, e.g. "train.steps=2,eval.tag=foo"')
 
 FLAGS = flags.FLAGS
 
@@ -201,8 +198,7 @@ def main(unused_argv):
 
 
   training = FLAGS.mode == TRAIN
-  config = utils.get_and_log_config(
-      FLAGS.config, FLAGS.config_override, FLAGS.model_dir, training)
+  config = utils.get_and_log_config(FLAGS.config, FLAGS.model_dir, training)
   config.training = training
 
   with strategy.scope():

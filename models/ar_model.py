@@ -199,7 +199,6 @@ class ARTrainer(model_lib.Trainer):
         tf.reduce_sum(token_weights_notpad) + 1e-9)
 
     # update metrics
-    self._metrics['loss'].update_state(loss)
     self._metrics['loss_notpad'].update_state(loss_notpad)
     self._metrics['accuracy_notpad'].update_state(
         tf.boolean_mask(target_seq, tf.greater(token_weights_notpad, 0)),
