@@ -1,8 +1,8 @@
 # Pix2Seq - A general framework for turning RGB pixels into semantically meaningful sequences
 
-![pix2seq](pix2seq.png)
-
 This is the *official* implementation of Pix2Seq in Tensorflow 2 with efficient TPUs/GPUs support as well as interactive debugging similar to Pytorch.
+
+![pix2seq](pix2seq.png)
 
 ## Models
 <a href="https://colab.research.google.com/github/google-research/pix2seq/blob/master/colabs/pix2seq_inference_object_detection.ipynb" target="_parent"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>
