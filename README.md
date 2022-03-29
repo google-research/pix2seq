@@ -1,6 +1,6 @@
 # Pix2Seq - A general framework for turning RGB pixels into semantically meaningful sequences
 
-This is the *official* implementation of Pix2Seq in Tensorflow 2 with efficient TPUs/GPUs support as well as interactive debugging similar to Pytorch.
+This is the official implementation of Pix2Seq in Tensorflow 2 with efficient TPUs/GPUs support as well as interactive debugging similar to Pytorch.
 
 ![pix2seq](pix2seq.png)
 
@@ -56,9 +56,9 @@ wget -c http://images.cocodataset.org/annotations/annotations_trainval2017.zip
 unzip annotations_trainval2017.zip
 ```
 
-(Optional) If accessing the pretrained checkpoints in cloud slows down the start of training/eval, you can download them mannually with following command `gsutil cp -r gs://folder .`.
+(Optional) If accessing the pretrained checkpoints in Cloud is slowing down or blocking the start of training/eval, you can download them manually with following command `gsutil cp -r gs://cloud_folder local_folder`, and update `pretrained_ckpt` in the config file accordingly.
 
-(Optional) If training doesn't start (due to NcclAllReduce error) or starts very slowly (due to graph building), try a different `cross_device_ops` for `tf.distribute.MirroredStrategy` in utils.py:build_strategy function.
+(Optional) If training fails at the start (due to NcclAllReduce error), try a different `cross_device_ops` for `tf.distribute.MirroredStrategy` in utils.py:build_strategy function.
 
 ### Instructions for training (fine-tuning) of objedct detection models.
 
@@ -74,9 +74,9 @@ Step 2: run `python3 run.py --mode=train --model_dir=/tmp/model_dir --config=con
 
 ### Instructions for evaluation of object detection models.
 
-Below is the instruction for starting an evaluation job, which monitors the specified directory and perform evaluation for latest and un-evaluated checkpoints. It can be started in parallel to or after the training.
+Below is the instruction for starting an evaluation job, which monitors the specified directory and perform (continuous) evaluation of the latest and un-evaluated checkpoints. It can be started in parallel to or after the training.
 
-Step 1: check [config_det_finetune.py](configs/config_det_finetune.py) and update if neccesary, such as `encoder_variant`, `image_size`. Set `checkpoint_dir` if neccesary (e.g., for evaluating our provided fine-tuning checkpoints).
+Step 1: check [config_det_finetune.py](configs/config_det_finetune.py) and update if neccesary, such as `encoder_variant`, `image_size`. Set `checkpoint_dir` if the checkpoints to evaluate are not in `model_dir` (e.g., for evaluating our provided fine-tuning checkpoints).
 
 Step 2: run `python3 run.py --mode=eval --model_dir=/tmp/model_dir --config=configs/config_det_finetune.py --config.dataset.coco_annotations_dir=/path/to/annotations --config.eval.batch_size=40`.
 
