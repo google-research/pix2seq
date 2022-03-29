@@ -124,7 +124,7 @@ def get_config(config_str=None):
           beta2=0.95,
           eps=1e-8,
           learning_rate_schedule='linear',
-          learning_rate_scaling=None,
+          learning_rate_scaling='none',
       ),
 
       train=D(

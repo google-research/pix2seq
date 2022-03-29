@@ -15,7 +15,6 @@
 # ==============================================================================
 """Object detection task via COCO metric evaluation."""
 
-import json
 import os
 import pickle
 
@@ -42,21 +41,11 @@ class TaskObjectDetection(task_lib.Task):
 
     if config.task.get('max_seq_len', 'auto') == 'auto':
       self.config.task.max_seq_len = config.task.max_instances_per_image * 5
-    if config.dataset.get('coco_annotations_dir'):
-      filename = (
-          config.dataset.train_filename
-          if config.training else config.dataset.val_filename)
-      gt_annotations_path = os.path.join(config.dataset.coco_annotations_dir,
-                                         filename)
-      with tf.io.gfile.GFile(gt_annotations_path, 'r') as f:
-        annotations = json.load(f)
-      self._category_names = {c['id']: c for c in annotations['categories']}
-    else:
-      gt_annotations_path = None
-      self._category_names = {}
+    anno = task_utils.coco_annotation_path(config, ret_category_names=True)
+    self._category_names = anno['category_names']
     self._coco_metrics = coco_metrics.CocoObjectDetectionMetric(
-        gt_annotations_path=gt_annotations_path,
-        filter_images_not_in_predictions=(gt_annotations_path and
+        gt_annotations_path=anno['gt_annotations_path'],
+        filter_images_not_in_predictions=(anno['gt_annotations_path'] and
                                           config.eval.steps is not None))
 
   def preprocess_single(self, dataset, batch_duplicates, training):

@@ -24,7 +24,6 @@ import operator
 import os
 import matplotlib
 import matplotlib.cm
-import ml_collections
 import numpy as np
 
 import vocab

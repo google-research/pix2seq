@@ -39,7 +39,7 @@ ViT-L          | 341.2            | 1333x1333  | 50.0      | [gs://pix2seq/coco_
 
 ### Colabs
 
-See [colabs](colabs) for inference and fine-tuning demos.
+See [colabs](colabs) for inference and fine-tuning demos. Give [it](https://colab.research.google.com/github/google-research/pix2seq/blob/master/colabs/pix2seq_inference_object_detection.ipynb) a try!
 
 
 ### Basic setup before running the code
@@ -68,7 +68,7 @@ Step 1: check [config_det_finetune.py](configs/config_det_finetune.py) and updat
 
 Step 2: run `python3 run.py --mode=train --model_dir=/tmp/model_dir --config=configs/config_det_finetune.py --config.dataset.coco_annotations_dir=/path/to/annotations --config.train.batch_size=32 --config.train.epochs=20 --config.optimization.learning_rate=3e-5`.
 
-(Optional) Setup tensorboard for training curves with `tensorboard --logidr=/tmp/model_dir`. Note: eval on this drill fine-tuning run (with vit-b 640x640 and 20 epochs) should give ~43.5 AP. Exact configurations used to reproduce the COCO fine-tuning results can be found in gs://pix2seq/coco_det_finetune.
+(Optional) Setup tensorboard for training curves with `tensorboard --logdir=/tmp/model_dir`. Note: eval on this drill fine-tuning run (with vit-b 640x640 and 20 epochs) should give ~43.5 AP. Exact configurations used to reproduce the COCO fine-tuning results can be found in gs://pix2seq/coco_det_finetune/...
 
 (Optional) Set `--run_eagerly=True` for interactive debuging (which will be slower).
 
@@ -80,7 +80,7 @@ Step 1: check [config_det_finetune.py](configs/config_det_finetune.py) and updat
 
 Step 2: run `python3 run.py --mode=eval --model_dir=/tmp/model_dir --config=configs/config_det_finetune.py --config.dataset.coco_annotations_dir=/path/to/annotations --config.eval.batch_size=40`.
 
-(Optional) Setup tensorboard for eval curves and detection visualizations with `tensorboard --logidr=/tmp/model_dir`.
+(Optional) Setup tensorboard for eval curves and detection visualizations with `tensorboard --logdir=/tmp/model_dir`.
 
 
 ## Cite

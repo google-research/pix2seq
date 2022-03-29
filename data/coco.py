@@ -40,8 +40,12 @@ class CocoDataset(dataset_lib.Dataset):
 
   def __init__(self, config: ml_collections.ConfigDict):
     super().__init__(config)
-    self._train_file_name = self.config.train_filename
-    self._val_file_name = self.config.val_filename
+    self._train_file_name = (
+        self.config.train_filename if self.config.train_split == 'train'
+        else self.config.val_filename)
+    self._val_file_name = (
+        self.config.train_filename if self.config.eval_split == 'train'
+        else self.config.val_filename)
 
   @property
   def _train_annotations(self):

@@ -15,9 +15,33 @@
 # ==============================================================================
 """Common task utils."""
 
+import json
+import os
 import utils
 import vocab
 import tensorflow as tf
+
+
+def coco_annotation_path(config, ret_category_names=True):
+  """Returns coco annotation path and category names (optionally)."""
+  gt_annotations_path = None
+  category_names = {}
+  if config.dataset.get('coco_annotations_dir'):
+    split = config.dataset.train_split if config.training else (
+        config.dataset.eval_split)
+    filename = (
+        config.dataset.train_filename
+        if split == 'train' else config.dataset.val_filename)
+    gt_annotations_path = os.path.join(config.dataset.coco_annotations_dir,
+                                       filename)
+    if ret_category_names:
+      with tf.io.gfile.GFile(gt_annotations_path, 'r') as f:
+        annotations = json.load(f)
+      category_names = {c['id']: c for c in annotations['categories']}
+  return {
+      'gt_annotations_path': gt_annotations_path,
+      'category_names': category_names
+  }
 
 
 def build_prompt_seq_from_task_id(task_vocab_id: int,
