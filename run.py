@@ -202,8 +202,10 @@ def main(unused_argv):
   config.training = training
 
   with strategy.scope():
-    if 'tasks' not in config:
+    if 'tasks' not in config or len(config.tasks) == 1:  # allow config override
       config.tasks = [config.task]
+    if 'datasets' not in config or len(config.datasets) == 1:
+      config.datasets = [config.dataset]
     dses = []
     tasks = []
     for c_task, c_dataset in zip(config.tasks, config.datasets):

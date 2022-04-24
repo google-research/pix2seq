@@ -164,7 +164,7 @@ class TaskObjectDetection(task_lib.Task):
         self.task_vocab_id, prompt_shape=(bsz, 1))
     pred_seq, logits, _ = model.infer(
         image, prompt_seq, encoded=None,
-        max_seq_len=config.max_instances_per_image_test * 5,
+        max_seq_len=(config.max_instances_per_image_test * 5 + 1),
         temperature=config.temperature, top_k=config.top_k, top_p=config.top_p)
     # if True:  # Sanity check by using gt response_seq as pred_seq.
     #   pred_seq = preprocessed_outputs[1]
@@ -318,12 +318,12 @@ class TaskObjectDetection(task_lib.Task):
 
 
 def add_image_summary_with_bbox(images, bboxes, classes, scores, category_names,
-                                image_ids, step, tag, max_images_shown=5):
+                                image_ids, step, tag, max_images_shown=3):
   """Adds image summary with GT / predicted bbox."""
   k = 0
+  del image_ids
   new_images = []
-  for image_, boxes_, scores_, classes_, image_id_ in zip(
-      images, bboxes, scores, classes, image_ids):
+  for image_, boxes_, scores_, classes_ in zip(images, bboxes, scores, classes):
     keep_indices = np.where(classes_ > 0)[0]
     image = vis_utils.visualize_boxes_and_labels_on_image_array(
         image=image_,
@@ -334,12 +334,11 @@ def add_image_summary_with_bbox(images, bboxes, classes, scores, category_names,
         use_normalized_coordinates=True,
         min_score_thresh=0.1,
         max_boxes_to_draw=100)
-    image = tf.image.convert_image_dtype(image, tf.float32)
-    tf.summary.image('{}_{}'.format(tag, int(image_id_)), [image], step=step)
-    new_images.append(image)
+    new_images.append(tf.image.convert_image_dtype(image, tf.float32))
     k += 1
     if max_images_shown >= 0 and k >= max_images_shown:
       break
+  tf.summary.image(tag, new_images, step=step, max_outputs=max_images_shown)
   return new_images
 
 

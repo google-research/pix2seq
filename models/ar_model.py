@@ -77,14 +77,20 @@ class Model(tf.keras.models.Model):
         config.decoder_output_bias, name='ar_decoder')
 
   def _tile_vis_output(self, vis_output, seq):
-    """Tile images of (bsz, ...) to fit sequences of (bsz*instances, seqlen)."""
+    """Tile vis_output per seq.
+
+    Args:
+      vis_output: `float` tensor of encoded images in shape of (bsz, ....).
+      seq: `int` sequence in shape of (bsz, seqlen),
+        or (bsz, instances, seqlen) if there are multiple sequences per image.
+
+    Returns:
+      vis_output of (bsz*instances, ...).
+      seq of (bsz*instances, ...).
+    """
     if seq.shape.rank > 2:
-      bsz = tf.shape(vis_output)[0]
       tile_factor = seq.shape.as_list()[-2]
-      vis_output = tf.expand_dims(vis_output, 1)  # [b, 1, t, d]
-      vis_output = tf.tile(vis_output, [1, tile_factor, 1, 1])
-      out_shape = [bsz * tile_factor] + vis_output.shape.as_list()[2:]
-      vis_output = tf.reshape(vis_output, out_shape)
+      vis_output = utils.tile_along_batch(vis_output, tile_factor)
       seq = utils.flatten_batch_dims(seq, out_rank=2)
     return vis_output, seq
 
@@ -126,7 +132,8 @@ class Model(tf.keras.models.Model):
       return logits
 
   def infer(self, images, prompt_seq, encoded=None, max_seq_len=None,
-            temperature=1, top_k=1, top_p=1., sampling_callback=None):
+            temperature=1, top_k=1, top_p=1., num_samples=1,
+            sampling_callback=None):
     """Model function call for inference.
 
     Args:
@@ -141,21 +148,30 @@ class Model(tf.keras.models.Model):
         token sampling.
       top_p: `float` scalar specifying the threshold of cumulative probablity
         for truncating tokens before token sampling.
+      num_samples: `int` number of samples to be generated for each instance.
       sampling_callback: a callbak `function` that take `next_logits`, and
         return `next_token`. This is used when users need a specific logic
         for sampling. Default to `None` with standard free-form sampling.
 
     Returns:
-      pred_seq: `int` prediction sequence of shape (bsz * instances, seqlen).
-      logits: `float` of shape (bsz * instances, seqlen, vocab_size).
+      pred_seq: `int` prediction sequence of shape
+          (bsz * instances * num_samples, seqlen)
+      logits: `float` of shape
+          (bsz * instances * num_samples, seqlen, vocab_size)
       encoded: `float` tensor of encoded images.
     """
     if encoded is None:
       encoded = self._encode_images(images, training=False)
     encoded, prompt_seq = self._tile_vis_output(encoded, prompt_seq)
+
+    # Tile by num_samples too.
+    encoded = utils.tile_along_batch(encoded, num_samples)
+    prompt_seq = utils.tile_along_batch(prompt_seq, num_samples)
+
     pred_seq, logits = self.decoder.infer(
         prompt_seq, encoded, max_seq_len,
         temperature, top_k, top_p, sampling_callback)
+
     return pred_seq, logits, encoded
 
 

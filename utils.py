@@ -300,9 +300,13 @@ def get_and_log_config(config, model_dir, training):
   config.model_dir = model_dir
   logging.info('Config: %s', config)
 
-  # Log config to the model directory for training jobs.
-  config_filepath = os.path.join(model_dir, 'config.json')
-  if training and not tf.io.gfile.exists(config_filepath):
+  # Log config to the model directory.
+  if training:
+    config_filepath = os.path.join(model_dir, 'config.json')
+  else:
+    config_filepath = os.path.join(model_dir, f'config_{config.eval.tag}.json')
+
+  if not tf.io.gfile.exists(config_filepath):
     tf.io.gfile.makedirs(model_dir)
     with tf.io.gfile.GFile(config_filepath, 'w') as f:
       f.write(config.to_json(indent=2, sort_keys=True))

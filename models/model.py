@@ -16,6 +16,7 @@
 """Abstract model file."""
 
 import abc
+from absl import logging
 import ml_collections
 import registry
 import utils
@@ -78,6 +79,7 @@ class Trainer(abc.ABC):
     self._metrics.update({
         f'loss_{t.name}': tf.keras.metrics.Mean(f'loss_{t.name}')
         for t in config.tasks})
+    self._print_params = True
 
   def train_step(self, examples, tasks, strategy):
     """Defines a single training step for model update given examples and tasks.
@@ -89,6 +91,7 @@ class Trainer(abc.ABC):
         specific task.
       strategy: tensorflow strategy such as `TPUStrategy` or `MirroredStrategy`.
     """
+    logging.info('train_step begins...')
     preprocessed_outputs = [
         t.preprocess_batched(e, training=True) for e, t in zip(examples, tasks)]
 
@@ -108,16 +111,18 @@ class Trainer(abc.ABC):
     self._metrics['loss'].update_state(loss)
     for k, v in task_loss_metrics.items():
       self._metrics[k].update_state(v)
-    self._metrics['total_num_params'].update_state(
-        utils.count_params(self._model, verbose=True))
     wmx = [tf.reduce_max(tf.math.abs(m)) for m in trainable_variables]
     self._metrics['weight_linf_norm'].update_state(tf.reduce_max(wmx))
     multiplier = strategy.num_replicas_in_sync
     self._metrics['grad_global_norm'].update_state(tf.linalg.global_norm(
         [tf.math.scalar_mul(multiplier, g) for g in grads if g is not None]))
+    self._metrics['total_num_params'].update_state(
+        utils.count_params(self._model, verbose=self._print_params))
+    self._print_params = False
+    logging.info('train_step ends...')
 
   @abc.abstractmethod
-  def compute_loss(self, preprocess_outputs):
+  def compute_loss(self, preprocessed_outputs):
     """Compute loss based on model outputs and targets."""
 
   def check_checkpoint_restored(self):
