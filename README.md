@@ -3,7 +3,7 @@
 This is the official implementation of Pix2Seq in Tensorflow 2 with efficient TPUs/GPUs support as well as interactive debugging similar to Pytorch.
 
 <div align="center">
-  <img width="85%" alt="Pix2Seq Illustration" src="pix2seq.gif">
+  <img width="95%" alt="Pix2Seq Illustration" src="pix2seq.gif">
 </div>
 <div align="center">
   An illustration of Pix2Seq for object detection (from <a href="https://ai.googleblog.com/2022/04/pix2seq-new-language-interface-for.html">Google AI blog here</a>).
