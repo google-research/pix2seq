@@ -65,7 +65,7 @@ unzip annotations_trainval2017.zip
 
 (Optional) If training fails at the start (due to NcclAllReduce error), try a different `cross_device_ops` for `tf.distribute.MirroredStrategy` in utils.py:build_strategy function.
 
-### Instructions for training (fine-tuning) of objedct detection models.
+### Instructions for training (fine-tuning) of object detection models.
 
 Below is the instruction for starting a training job, where we've set up a configuration mainly for fine-tuning the objects365 pretrained models.
 
