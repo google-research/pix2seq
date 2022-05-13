@@ -1,0 +1,17 @@
+build:
+  cuda: "11.2"
+  gpu: true
+  python_version: "3.8"
+  system_packages:
+    - "libgl1-mesa-glx"
+    - "libglib2.0-0"
+  python_packages:
+    - "numpy==1.21.1"
+    - "ipython==7.21.0"
+    - "matplotlib==3.5.1"
+    - "tensorflow-addons==0.16.1"
+    - "pycocotools==2.0.4"
+    - "ml-collections==0.1.1"
+    - "tensorflow-gpu==2.8.0"
+
+predict: "predict.py:Predictor"
