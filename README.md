@@ -12,6 +12,9 @@ This is the official implementation of Pix2Seq in Tensorflow 2 with efficient TP
 ## Models
 <a href="https://colab.research.google.com/github/google-research/pix2seq/blob/master/colabs/pix2seq_inference_object_detection.ipynb" target="_parent"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>
 
+### Web Demo
+Try Replicate web demo here [![Replicate](https://replicate.com/google-research/pix2seq/badge)](https://replicate.com/google-research/pix2seq)
+
 ### Objects365 object detection pretrained checkpoints
 
 Backbone       | Total params (M) | Image size | Google cloud storage location
