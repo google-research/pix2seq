@@ -16,32 +16,86 @@
 """Common task utils."""
 
 import json
-import os
+from typing import Optional, Any, Dict
+from absl import logging
 import utils
 import vocab
 import tensorflow as tf
 
 
-def coco_annotation_path(config, ret_category_names=True):
-  """Returns coco annotation path and category names (optionally)."""
-  gt_annotations_path = None
+def get_category_names(
+    category_names_path: Optional[str]) -> Dict[int, Dict[str, Any]]:
+  """Returns dictionary of category names.
+
+  Args:
+    category_names_path: Path to category names json. Expected to be a json file
+      with the format {"categories": [{"id": 1, "name": "Person"}, ...]}. If not
+      specified, the category id is used as the name.
+
+  Returns:
+    Dictionary with the format {1: {"name": "Person"}, ...}
+  """
+  if not category_names_path:
+    logging.info(
+        'category_names_path not specified, default category names will be used'
+    )
+    return {i: {'name': str(i)} for i in range(10000)}
+  logging.info('Loading category names from %s', category_names_path)
   category_names = {}
-  if config.dataset.get('coco_annotations_dir'):
-    split = config.dataset.train_split if config.training else (
-        config.dataset.eval_split)
-    filename = (
-        config.dataset.train_filename
-        if split == 'train' else config.dataset.val_filename)
-    gt_annotations_path = os.path.join(config.dataset.coco_annotations_dir,
-                                       filename)
-    if ret_category_names:
-      with tf.io.gfile.GFile(gt_annotations_path, 'r') as f:
-        annotations = json.load(f)
-      category_names = {c['id']: c for c in annotations['categories']}
-  return {
-      'gt_annotations_path': gt_annotations_path,
-      'category_names': category_names
-  }
+  with tf.io.gfile.GFile(category_names_path, 'r') as f:
+    annotations = json.load(f)
+  category_names = {c['id']: c for c in annotations['categories']}
+  return category_names
+
+
+def build_instance_prompt_seq(task_vocab_id: int, bbox, label,
+                              quantization_bins, coord_vocab_shift):
+  """"Build prompt seq for instance tasks like instance segmentation, keypoints.
+
+  Args:
+    task_vocab_id: Vocab id for the task.
+    bbox: `float` bounding box of shape (bsz, n, 4).
+    label: `int` label of shape (bsz, n).
+    quantization_bins: `int`.
+    coord_vocab_shift: `int`, shifting coordinates by a specified integer.
+
+  Returns:
+    discrete prompt sequence of (task_id, bbox, label) with shape (bsz, n, 6).
+    tokens are zero'ed if label is padding (0).
+  """
+  task_id = tf.constant(task_vocab_id)
+  quantized_bbox = utils.quantize(bbox, quantization_bins)
+  quantized_bbox = quantized_bbox + coord_vocab_shift
+  new_label = tf.expand_dims(label + vocab.BASE_VOCAB_SHIFT, -1)
+  prompt_seq = tf.concat([quantized_bbox, new_label], axis=-1)
+  task_id = tf.zeros_like(prompt_seq[..., :1]) + tf.cast(task_id, label.dtype)
+  prompt_seq = tf.concat([task_id, prompt_seq], -1)
+  is_padding = tf.expand_dims(tf.equal(label, 0), -1)
+  prompt_seq = tf.where(is_padding, tf.zeros_like(prompt_seq), prompt_seq)
+  return prompt_seq
+
+
+def build_instance_response_seq_from_points(points, label, quantization_bins,
+                                            coord_vocab_shift):
+  """"Build target seq for instance tasks like instance segmentation, keypoints.
+
+  Args:
+    points: `float` points of shape (bsz, n, k).
+    label: `int` label of shape (bsz, n).
+    quantization_bins: `int`.
+    coord_vocab_shift: `int`, shifting coordinates by a specified integer.
+
+  Returns:
+    discrete target sequence with shape (bsz, n, k). tokens are zero'ed
+    if label is padding (0).
+  """
+  quantized_points = utils.quantize(points, quantization_bins)
+  quantized_points = quantized_points + coord_vocab_shift
+  response_seq = utils.replace_reserved_tokens(
+      quantized_points, points, vocab.FLOAT_TO_TOKEN)
+  is_padding = tf.expand_dims(tf.equal(label, 0), -1)
+  response_seq = tf.where(is_padding, tf.zeros_like(response_seq), response_seq)
+  return response_seq
 
 
 def build_prompt_seq_from_task_id(task_vocab_id: int,
@@ -67,6 +121,14 @@ def build_prompt_seq_from_task_id(task_vocab_id: int,
     prompt_seq = tf.zeros(prompt_shape, dtype=tf.int64) + tf.cast(
         task_id, dtype=tf.int64)
   return prompt_seq
+
+
+def decode_instance_seq_to_points(seq, quantization_bins, coord_vocab_shift):
+  """Decode points for seq from `build_instance_response_seq_from_points`."""
+  assert seq.dtype in (tf.int64, tf.int32)
+  points = seq - coord_vocab_shift
+  points = utils.dequantize(points, quantization_bins)
+  return utils.replace_reserved_tokens(points, seq, vocab.TOKEN_TO_FLOAT)
 
 
 def decode_object_seq_to_bbox(logits,
@@ -130,6 +192,24 @@ def seq_to_bbox(seq, quantization_bins, seq_format='yxyx_name'):
   quantized_box = tf.concat([ymin, xmin, ymax, xmax], axis=-1)
   quantized_box = utils.dequantize(quantized_box, quantization_bins)
   return tf.minimum(tf.maximum(quantized_box, 0), 1)
+
+
+def compute_weighted_scores(bbox_scores, pred_seq, logits,
+                            points_score_weight):
+  """Computes per instance score as weighted sum of box score and mean pred_seq score."""
+  probs = tf.nn.softmax(logits, axis=-1)
+  # Set 0 weight for padding tokens.
+  token_weight = tf.where(tf.equal(pred_seq, vocab.PADDING_TOKEN), 0.0, 1.0)
+  likelihoods = tf.gather(probs, pred_seq, batch_dims=pred_seq.shape.rank)
+  points_score = (
+      tf.reduce_sum(likelihoods * token_weight, axis=-1) /
+      tf.reduce_sum(token_weight, axis=-1))
+  num_instances_in_batch = bbox_scores.shape[0]
+  num_samples = points_score.shape[0] // num_instances_in_batch
+  points_score = tf.reshape(points_score, [num_instances_in_batch, num_samples])
+  points_score = tf.reduce_mean(points_score, axis=-1)
+  return (points_score_weight * points_score +
+          (1 - points_score_weight) * bbox_scores)
 
 
 def join_if_not_none(args, sep):

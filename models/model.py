@@ -96,16 +96,20 @@ class Trainer(abc.ABC):
         t.preprocess_batched(e, training=True) for e, t in zip(examples, tasks)]
 
     task_loss_metrics = {}
-    with tf.GradientTape() as tape:
-      loss = 0
-      for o, task in zip(preprocessed_outputs, tasks):
+    loss = 0
+    grads = []
+    for i, (o, task) in enumerate(zip(preprocessed_outputs, tasks)):
+      with tf.GradientTape() as tape:
         loss_t = self.compute_loss(o)
         task_loss_metrics[f'loss_{task.config.task.name}'] = loss_t
         loss += loss_t * task.config.task.weight
-      trainable_variables = self._model.trainable_variables
-      grads = tape.gradient(  # div by num_replicas_in_sync for mean gradient.
-          loss / strategy.num_replicas_in_sync, trainable_variables)
-      self._optimizer.apply_gradients(zip(grads, trainable_variables))
+        trainable_variables = self._model.trainable_variables
+        grads_t = tape.gradient(  # div by num_replicas_in_sync for mean grad.
+            loss_t * task.config.task.weight / strategy.num_replicas_in_sync,
+            trainable_variables)
+        grads = grads_t if i == 0 else [
+            g + gt for g, gt in zip(grads, grads_t)]
+    self._optimizer.apply_gradients(zip(grads, trainable_variables))
 
     # Update metrics.
     self._metrics['loss'].update_state(loss)

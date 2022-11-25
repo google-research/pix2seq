@@ -14,9 +14,10 @@
 # limitations under the License.
 # ==============================================================================
 """Object detection task via COCO metric evaluation."""
-
+import json
 import os
 import pickle
+from typing import Any, Dict, List
 
 from absl import logging
 import ml_collections
@@ -24,7 +25,8 @@ import numpy as np
 import utils
 import vocab
 from data import data_utils
-from metrics import coco_metrics
+from metrics import metric_registry
+from metrics import metric_utils
 from tasks import task as task_lib
 from tasks import task_utils
 from tasks.visualization import vis_utils
@@ -41,12 +43,16 @@ class TaskObjectDetection(task_lib.Task):
 
     if config.task.get('max_seq_len', 'auto') == 'auto':
       self.config.task.max_seq_len = config.task.max_instances_per_image * 5
-    anno = task_utils.coco_annotation_path(config, ret_category_names=True)
-    self._category_names = anno['category_names']
-    self._coco_metrics = coco_metrics.CocoObjectDetectionMetric(
-        gt_annotations_path=anno['gt_annotations_path'],
-        filter_images_not_in_predictions=(anno['gt_annotations_path'] and
-                                          config.eval.steps is not None))
+    self._category_names = task_utils.get_category_names(
+        config.dataset.get('category_names_path'))
+    metric_config = config.task.get('metric')
+    if metric_config and metric_config.get('name'):
+      self._coco_metrics = metric_registry.MetricRegistry.lookup(
+          metric_config.name)(config)
+    else:
+      self._coco_metrics = None
+    if self.config.task.get('eval_outputs_json_path', None):
+      self.eval_output_annotations = []
 
   def preprocess_single(self, dataset, batch_duplicates, training):
     """Task-specific preprocessing of individual example in the dataset.
@@ -247,20 +253,31 @@ class TaskObjectDetection(task_lib.Task):
     # Copy outputs to cpu.
     new_outputs = []
     for i in range(len(outputs)):
-      logging.info('Copying output at index %d to cpu', i)
+      logging.info('Copying output at index %d to cpu for cpu post-process', i)
       new_outputs.append(tf.identity(outputs[i]))
     (images, image_ids, pred_bboxes, pred_bboxes_rescaled, pred_classes,  # pylint: disable=unbalanced-tuple-unpacking
      scores, gt_classes, gt_bboxes, gt_bboxes_rescaled, area, is_crowd
      ) = new_outputs
 
+    if self.config.task.get('eval_outputs_json_path', None):
+      annotations = build_annotations(image_ids.numpy(),
+                                      pred_classes.numpy(),
+                                      pred_bboxes_rescaled.numpy(),
+                                      scores.numpy(),
+                                      len(self.eval_output_annotations))
+      self.eval_output_annotations.extend(annotations)
+
     # Log/accumulate metrics.
-    if self._coco_metrics.gt_annotations_path:
-      self._coco_metrics.record_detection(
+    if self._coco_metrics:
+      self._coco_metrics.record_prediction(
           image_ids, pred_bboxes_rescaled, pred_classes, scores)
-    else:
-      self._coco_metrics.record_detection(
-          image_ids, pred_bboxes_rescaled, pred_classes, scores,
-          gt_bboxes_rescaled, gt_classes, areas=area, is_crowds=is_crowd)
+      if not self._coco_metrics.gt_annotations_path:
+        self._coco_metrics.record_groundtruth(
+            image_ids,
+            gt_bboxes_rescaled,
+            gt_classes,
+            areas=area,
+            is_crowds=is_crowd)
 
     # Image summary.
     if eval_step <= 10 or ret_results:
@@ -280,6 +297,7 @@ class TaskObjectDetection(task_lib.Task):
             image_ids_, train_step, tag,
             max_images_shown=(-1 if ret_results else 3))
 
+    logging.info('Done post-process')
     if ret_results:
       return ret_images
 
@@ -301,20 +319,43 @@ class TaskObjectDetection(task_lib.Task):
       summary_writer.flush()
     result_json_path = os.path.join(
         self.config.model_dir, eval_tag + 'cocoeval.pkl')
-    tosave = {'dataset': self._coco_metrics.dataset,
-              'detections': np.array(self._coco_metrics.detections)}
-    with tf.io.gfile.GFile(result_json_path, 'wb') as f:
-      pickle.dump(tosave, f)
+    if self._coco_metrics:
+      tosave = {'dataset': self._coco_metrics.dataset,
+                'detections': np.array(self._coco_metrics.detections)}
+      with tf.io.gfile.GFile(result_json_path, 'wb') as f:
+        pickle.dump(tosave, f)
     self.reset_metrics()
+    if self.config.task.get('eval_outputs_json_path', None):
+      annotations_to_save = {
+          'annotations': self.eval_output_annotations,
+          'categories': list(self._category_names.values())
+      }
+      json_path = self.config.task.eval_outputs_json_path.format(
+          eval_split=self.config.dataset.eval_split,
+          top_p=self.config.task.top_p,
+          max_instances_per_image_test=self.config.task
+          .max_instances_per_image_test,
+          step=int(step))
+      tf.io.gfile.makedirs(os.path.basename(json_path))
+      logging.info('Saving %d result annotations to %s',
+                   len(self.eval_output_annotations),
+                   json_path)
+      with tf.io.gfile.GFile(json_path, 'w') as f:
+        json.dump(annotations_to_save, f)
+      self.eval_output_annotations = []
     return metrics
 
   def compute_scalar_metrics(self, step):
     """Returns a dict containing scalar metrics to log."""
-    return self._coco_metrics.result()
+    if self._coco_metrics:
+      return self._coco_metrics.result(step)
+    else:
+      return {}
 
   def reset_metrics(self):
     """Reset states of metrics accumulators."""
-    self._coco_metrics.reset_states()
+    if self._coco_metrics:
+      self._coco_metrics.reset_states()
 
 
 def add_image_summary_with_bbox(images, bboxes, classes, scores, category_names,
@@ -407,3 +448,24 @@ def build_response_seq_from_bbox(bbox,
   token_weights = utils.flatten_non_batch_dims(token_weights, 2)
 
   return response_seq, response_seq_class_m, token_weights
+
+
+def build_annotations(image_ids, category_ids, boxes, scores,
+                      counter) -> List[Dict[str, Any]]:
+  """Builds annotations."""
+  annotations = []
+  for image_id, category_id_list, box_list, score_list in zip(
+      image_ids, category_ids, boxes, scores):
+    for category_id, box, score in zip(category_id_list, box_list, score_list):
+      category_id = int(category_id)
+      if category_id:
+        annotations.append({
+            'id': counter,
+            'image_id': int(image_id),
+            'category_id': category_id,
+            'bbox': metric_utils.yxyx_to_xywh(box.tolist()),
+            'iscrowd': False,
+            'score': float(score)
+        })
+        counter += 1
+  return annotations

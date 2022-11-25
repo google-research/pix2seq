@@ -16,31 +16,28 @@
 """Config file for object detection fine-tuning and evaluation."""
 
 import copy
-# pylint: disable=invalid-name,line-too-long,missing-docstring
+
+from configs import dataset_configs
 from configs.config_base import architecture_config_map
 from configs.config_base import D
 
-
-task_specific_coco_dataset_config = {
-    'object_detection':
-        D(
-            name='object_detection',
-            tfds_name='coco/2017',
-            train_filename='instances_train2017.json',
-            val_filename='instances_val2017.json',
-        ),
-}
+# pylint: disable=invalid-name,line-too-long,missing-docstring
 
 
 def get_config(config_str=None):
   """config_str is either empty or contains task,architecture variants."""
 
-  task_variant = 'object_detection'
+  task_variant = 'object_detection@coco/2017_object_detection'
   encoder_variant = 'vit-b'                 # Set model architecture.
-  image_size = 640                          # Set image size.
+  image_size = (640, 640)                   # Set image size.
+
+  tasks_and_datasets = []
+  for task_and_ds in task_variant.split('+'):
+    tasks_and_datasets.append(task_and_ds.split('@'))
 
 
-  coco_annotations_dir = 'annotations'
+  # Download from gs://pix2seq/multi_task/data/coco/json
+  coco_annotations_dir = '/tmp/coco_annotations'
 
   task_config_map = {
       'object_detection': D(
@@ -68,21 +65,11 @@ def get_config(config_str=None):
       ),
   }
 
-  shared_coco_dataset_config = D(
-      train_split='train',
-      eval_split='validation',
-      coco_annotations_dir=coco_annotations_dir,
-      batch_duplicates=1,
-      cache_dataset=False,
-      label_shift=0,
-  )
-
   task_d_list = []
   dataset_list = []
-  for tv in task_variant.split('+'):
+  for tv, ds_name in tasks_and_datasets:
     task_d_list.append(task_config_map[tv])
-    dataset_config = copy.deepcopy(shared_coco_dataset_config)
-    dataset_config.update(task_specific_coco_dataset_config[tv])
+    dataset_config = copy.deepcopy(dataset_configs.dataset_configs[ds_name])
     dataset_list.append(dataset_config)
 
   config = D(
@@ -140,7 +127,7 @@ def get_config(config_str=None):
       eval=D(
           tag='eval',
           checkpoint_dir='',                # checkpoint_dir will be model_dir if not set.
-          # checkpoint_dir=get_coco_finetuned_checkpoint(encoder_variant, image_size),
+          # checkpoint_dir=get_coco_finetuned_checkpoint(encoder_variant, image_size[0]),
           batch_size=8,                     # needs to be divisible by total eval examples.
           steps=0,                          # 0 means eval over full validation set.
       ),

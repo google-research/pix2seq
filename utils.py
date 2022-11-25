@@ -15,6 +15,7 @@
 # ==============================================================================
 """General utils (used across different modules)."""
 
+from concurrent import futures
 import copy
 import functools
 import json
@@ -25,6 +26,7 @@ import os
 import matplotlib
 import matplotlib.cm
 import numpy as np
+import time
 
 import vocab
 import tensorflow as tf
@@ -71,6 +73,63 @@ def flatten_non_batch_dims(t, out_rank):
   new_last_dim = functools.reduce(operator.mul, shape_list[split:])
   out_shape = inner_dims + [new_last_dim]
   return tf.reshape(t, out_shape)
+
+
+def int2bits(x, n, out_dtype=None):
+  """Convert an integer x in (...) into bits in (..., n)."""
+  x = tf.bitwise.right_shift(tf.expand_dims(x, -1), tf.range(n))
+  x = tf.math.mod(x, 2)
+  if out_dtype and out_dtype != x.dtype:
+    x = tf.cast(x, out_dtype)
+  return x
+
+
+def bits2int(x, out_dtype):
+  """Converts bits x in (..., n) into an integer in (...)."""
+  x = tf.cast(x, out_dtype)
+  x = tf.reduce_sum((x * 2)**(tf.range(tf.shape(x)[-1])), -1) - tf.cast(
+      x[..., 0] == 0, x.dtype)
+  return x
+
+
+def images2patches(images, patch_size, dividers=(1,), keep_spatial=True):
+  """Extract patches of same size in multiple resolutions."""
+  _, height, width, _ = shape_as_list(images)   # (bsz, h, w, c)
+  patches_list = []
+  for d in dividers:
+    inputs = images
+    if d > 1:
+      inputs = tf.image.resize(
+          inputs, [height // d, width // d], method='bicubic', antialias=True)
+    patches = tf.image.extract_patches(
+        inputs,
+        sizes=[1, patch_size, patch_size, 1],
+        strides=[1, patch_size, patch_size, 1],
+        rates=[1, 1, 1, 1],
+        padding='VALID')
+    if not keep_spatial:
+      pshape = shape_as_list(patches)  # (bsz, #p1, #p2, p_size1*p_size2*3)
+      patches = tf.reshape(patches, [pshape[0], pshape[1]*pshape[2], pshape[3]])
+    patches_list.append(patches)
+  return patches_list
+
+
+def patches2images(patches_list, patch_size):
+  """Putting list of patches back into images."""
+  images_list = []
+  for patches in patches_list:
+    if patches.shape.ndims == 3:
+      bsz, n_patches, d = shape_as_list(patches)   # (bsz, n_patches, d)
+      s = tf.cast(tf.math.sqrt(tf.cast(n_patches, tf.float32)), tf.int32)
+      patches = tf.reshape(patches, [bsz, s, s, d])
+    else:
+      assert patches.shape.ndims == 4  # (bsz, h, w, d)
+    if patch_size > 1:
+      images = tf.nn.depth_to_space(patches, patch_size)
+    else:
+      images = patches
+    images_list.append(images)
+  return images_list
 
 
 def tile_along_batch(t, factor):
@@ -252,7 +311,7 @@ def get_train_steps(dataset, train_steps, train_epochs, train_batch_size):
 def get_eval_steps(dataset, eval_steps, eval_batch_size):
   """Determine the number of eval steps."""
   num_eval_examples = dataset.num_eval_examples
-  if not eval_steps and num_eval_examples % eval_batch_size != 0:
+  if not eval_steps and num_eval_examples and num_eval_examples % eval_batch_size != 0:
     raise ValueError('Only divisible eval batch sizes are currently supported.')
   # TODO(b/181662974): Revert this and support non-even batch sizes.
   # return eval_steps or int(
@@ -279,9 +338,8 @@ def count_params(model, verbose=True):
     if verbose:
       logging.info('%s\t%s', var.name, var.shape)
     total_params += np.prod(var.shape)
-  total_params = total_params / 1e6
   if verbose:
-    logging.info('Total number of parameters: {:.2f}M'.format(total_params))
+    logging.info('Total number of parameters: {:,}'.format(total_params))
   return total_params
 
 
@@ -338,3 +396,29 @@ def colorize(images, vmin=None, vmax=None, cmap=None):
   cm = matplotlib.cm.get_cmap(cmap if cmap is not None else 'viridis')
   colors = tf.constant(cm.colors, dtype=tf.float32)
   return tf.gather(colors, indices)
+
+
+def copy_dir(source_dir, destination_dir):
+  """Copy files in the source directory to a destination directory."""
+  logging.info('Copying files from %s to %s', source_dir, destination_dir)
+  start = time.time()
+  if tf.io.gfile.exists(destination_dir):
+    logging.info('Removing existing files at %s', destination_dir)
+    tf.io.gfile.rmtree(destination_dir)
+  tf.io.gfile.makedirs(destination_dir)
+  filenames = tf.io.gfile.listdir(source_dir)
+  copy_fns = [
+      lambda filename=filename: tf.io.gfile.copy(
+          os.path.join(source_dir, filename),
+          os.path.join(destination_dir, filename)) for filename in filenames
+  ]
+  runInParallel(copy_fns)
+  logging.info('Copying %d files took %.2f seconds', len(filenames),
+               time.time() - start)
+
+
+def runInParallel(fns):
+  with futures.ThreadPoolExecutor() as executor:
+    tasks = [executor.submit(fn) for fn in fns]
+    for task in tasks:
+      task.result()

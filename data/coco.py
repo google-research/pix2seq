@@ -22,115 +22,45 @@ the images in coco/2017 using the object/id. For keypoints dataset, instances
 which are not in the person category are dropped.
 """
 
-import collections
-import json
-import os
-from absl import logging
-import ml_collections
 import numpy as np
-
 import utils
 import vocab
 from data import dataset as dataset_lib
+from data import decode_utils
 import tensorflow as tf
 
 
-class CocoDataset(dataset_lib.Dataset):
-  """Dataset for COCO tasks."""
+def _xy_to_yx(tensor):
+  """Convert a tensor in xy order into yx order.
 
-  def __init__(self, config: ml_collections.ConfigDict):
-    super().__init__(config)
-    self._train_file_name = (
-        self.config.train_filename if self.config.train_split == 'train'
-        else self.config.val_filename)
-    self._val_file_name = (
-        self.config.train_filename if self.config.eval_split == 'train'
-        else self.config.val_filename)
+  Args:
+    tensor: of shape [num_instances, points * 2] in the xy order.
 
-  @property
-  def _train_annotations(self):
-    if not hasattr(self, '_train_annotations_cache'):
-      filename = self._train_file_name
-      train_annotations_path = os.path.join(self.config.coco_annotations_dir,
-                                            filename)
-      self._train_annotations_cache = load_annnotations(
-          train_annotations_path)
-    return self._train_annotations_cache
-
-  @property
-  def _val_annotations(self):
-    if not hasattr(self, '_val_annotations_cache'):
-      filename = self._val_file_name
-      val_annotations_path = os.path.join(self.config.coco_annotations_dir,
-                                          filename)
-      self._val_annotations_cache = load_annnotations(
-          val_annotations_path)
-    return self._val_annotations_cache
-
-  @property
-  def _train_id_to_ann(self):
-    if not hasattr(self, '_train_id_to_ann_cache'):
-      self._train_id_to_ann_cache = {
-          ann['id']: ann for ann in self._train_annotations['annotations']
-      }
-    return self._train_id_to_ann_cache
-
-  @property
-  def _val_id_to_ann(self):
-    if not hasattr(self, '_val_id_to_ann_cache'):
-      self._val_id_to_ann_cache = {
-          ann['id']: ann for ann in self._val_annotations['annotations']
-      }
-    return self._val_id_to_ann_cache
-
-  def _get_areas(self, object_ids, training):
-    num_instances = tf.shape(object_ids)[0]
-    out_shape = [num_instances]
-    out_dtype = tf.float32
-    id_to_ann = (self._train_id_to_ann if training else self._val_id_to_ann)
-
-    def get_area(ids):
-      return np.asarray([id_to_ann[i]['area'] for i in ids], dtype=np.float32)
-
-    areas = tf.numpy_function(get_area, (object_ids,), (out_dtype,))
-    areas = tf.reshape(areas, out_shape)
-    return areas
-
-  def _get_labels(self, object_ids, training):
-    """"Returns COCO category id in in [1, 91]."""
-    num_instances = tf.shape(object_ids)[0]
-    out_shape = [num_instances]
-    out_dtype = tf.int64
-    id_to_ann = (self._train_id_to_ann if training else self._val_id_to_ann)
-
-    def get_label(ids):
-
-      def id_to_label(i):
-        if i in id_to_ann:
-          return id_to_ann[i]['category_id']
-        else:
-          return 0
-
-      return np.asarray([id_to_label(i) for i in ids], dtype=np.int64)
-
-    label = tf.numpy_function(get_label, (object_ids,), (out_dtype,))
-    label = tf.reshape(label, out_shape)
-    return label
-
-  def get_category_names(self, training):
-    if not hasattr(self, '_category_names_cache'):
-      ann_dict = self._train_annotations if training else self._val_annotations
-      if 'categories' in ann_dict:
-        categories = ann_dict['categories']
-        self._category_names_cache = {c['id']: c for c in categories}
-      else:
-        self._category_names_cache = None
-    return self._category_names_cache
+  Returns:
+    a tensor of shape [num_instances, points, 2] in the yx order.
+  """
+  max_points = tf.shape(tensor)[1] / 2
+  t = tf.reshape(tensor, [-1, max_points, 2])
+  t = tf.stack([t[:, :, 1], t[:, :, 0]], axis=2)
+  return tf.reshape(t, [-1, max_points * 2])
 
 
-@dataset_lib.DatasetRegistry.register('object_detection')
-class CocoObjectDetectionDataset(CocoDataset):
+@dataset_lib.DatasetRegistry.register('coco/2017_object_detection')
+class CocoObjectDetectionTFRecordDataset(dataset_lib.TFRecordDataset):
   """Coco object detection dataset."""
+
+  def get_feature_map(self):
+    """Returns feature map for parsing the TFExample."""
+    image_feature_map = decode_utils.get_feature_map_for_image()
+    detection_feature_map = decode_utils.get_feature_map_for_object_detection()
+    return {**image_feature_map, **detection_feature_map}
+
+  def filter_example(self, example, training):
+    # Filter out examples with no instances.
+    if training:
+      return tf.shape(example['image/object/bbox/xmin'])[0] > 0
+    else:
+      return True
 
   def extract(self, example, training):
     """Extracts needed features & annotations into a flat dictionary.
@@ -148,40 +78,232 @@ class CocoObjectDetectionDataset(CocoDataset):
       example: `dict` of relevant features and labels.
     """
     features = {
-        'image': tf.image.convert_image_dtype(example['image'], tf.float32),
-        'image/id': example['image/id']
+        'image': decode_utils.decode_image(example),
+        'image/id': tf.strings.to_number(example['image/source_id'], tf.int64),
     }
-    object_ids = example['objects']['id']
-    bbox = example['objects']['bbox']
-    iscrowd = example['objects']['is_crowd']
 
-    # Drop crowded object annotation during both training and eval.
-    not_is_crowd = tf.logical_not(iscrowd)
-    object_ids = tf.boolean_mask(object_ids, not_is_crowd)
-    bbox = tf.boolean_mask(bbox, not_is_crowd)
-    iscrowd = tf.boolean_mask(iscrowd, not_is_crowd)
+    bbox = decode_utils.decode_boxes(example)
+    scale = 1. / utils.tf_float32(tf.shape(features['image'])[:2])
+    bbox = utils.scale_points(bbox, scale)
 
-    labels = self._get_labels(object_ids, training)
-    areas = self._get_areas(object_ids, training)
     labels = {
-        'object/id': object_ids,
-        'label': labels,
+        'label': example['image/object/class/label'],
         'bbox': bbox,
-        'area': areas,
-        'is_crowd': iscrowd,
+        'area': decode_utils.decode_areas(example),
+        'is_crowd': decode_utils.decode_is_crowd(example),
     }
+
     return features, labels
 
 
-def load_annnotations(annotations_path):
-  """Returns dict of object id to annotation."""
-  logging.info('Loading annotations from %s', annotations_path)
-  with tf.io.gfile.GFile(annotations_path, 'r') as f:
-    annotations = json.load(f)
-  return annotations
+@dataset_lib.DatasetRegistry.register('coco/2017_instance_segmentation')
+class CocoInstanceSegmentationTFRecordDataset(dataset_lib.TFRecordDataset):
+  """Coco instance segmentation dataset."""
+
+  def get_feature_map(self):
+    """Returns feature map for parsing the TFExample."""
+    image_feature_map = decode_utils.get_feature_map_for_image()
+    detection_feature_map = decode_utils.get_feature_map_for_object_detection()
+    seg_feature_map = decode_utils.get_feature_map_for_instance_segmentation()
+    return {**image_feature_map, **detection_feature_map, **seg_feature_map}
+
+  def filter_example(self, example, training):
+    # Filter out examples with no instances, to avoid error when converting
+    # RaggedTensor to tensor: `Invalid first partition input. Tensor requires
+    # at least one element.`
+    return tf.shape(example['image/object/bbox/xmin'])[0] > 0
+
+  def extract(self, example, training):
+    """Extracts needed features & annotations into a flat dictionary.
+
+    Note:
+      - label starts at 1 instead of 0, as 0 is reserved for special use
+        (such as padding).
+      - coordinates (e.g. bbox) are (normalized to be) in [0, 1].
+
+    Args:
+      example: `dict` of raw features.
+      training: `bool` of training vs eval mode.
+
+    Returns:
+      example: `dict` of relevant features and labels.
+    """
+    assert not self.task_config.shuffle_polygon_start_point
+    features = {
+        'image': decode_utils.decode_image(example),
+        'image/id': tf.strings.to_number(example['image/source_id'], tf.int64),
+    }
+
+    max_points = self.task_config.max_points_per_object
+    polygons = example['image/object/segmentation'].to_tensor(
+        default_value=vocab.PADDING_FLOAT,
+        shape=[None, max_points * 2])
+    polygons = _xy_to_yx(polygons)
+
+    bbox = decode_utils.decode_boxes(example)
+    labels = example['image/object/class/label']
+    iscrowd = decode_utils.decode_is_crowd(example)
+    areas = decode_utils.decode_areas(example)
+    scores = decode_utils.decode_scores(example)
+
+    # Drop crowded object annotation during both training and eval.
+    is_valid = tf.logical_not(iscrowd)
+    bbox = tf.boolean_mask(bbox, is_valid)
+    iscrowd = tf.boolean_mask(iscrowd, is_valid)
+    labels = tf.boolean_mask(labels, is_valid)
+    areas = tf.boolean_mask(areas, is_valid)
+    polygons = tf.boolean_mask(polygons, is_valid)
+    scores = tf.boolean_mask(scores, is_valid)
+
+    scale = 1. / utils.tf_float32(tf.shape(features['image'])[:2])
+    labels = {
+        'label': labels,
+        'bbox': utils.scale_points(bbox, scale),
+        'area': areas,
+        'is_crowd': iscrowd,
+        'polygon': utils.scale_points(polygons, scale),
+        'scores': scores
+    }
+
+    return features, labels
 
 
-def xy2yx(seq):
-  x = np.asarray(seq[::2]).reshape([-1, 1])
-  y = np.asarray(seq[1::2]).reshape([-1, 1])
-  return np.concatenate([y, x], axis=-1).reshape([-1]).tolist()
+@dataset_lib.DatasetRegistry.register('coco/2017_keypoint_detection')
+class CocoKeypointDetectionTFRecordDataset(dataset_lib.TFRecordDataset):
+  """Coco keypoint detection dataset."""
+
+  def get_feature_map(self):
+    """Returns feature map for parsing the TFExample."""
+    image_feature_map = decode_utils.get_feature_map_for_image()
+    detection_feature_map = decode_utils.get_feature_map_for_object_detection()
+    key_feature_map = decode_utils.get_feature_map_for_keypoint_detection()
+    return {**image_feature_map, **detection_feature_map, **key_feature_map}
+
+  def filter_example(self, example, training):
+    # Filter out examples without keypoints.
+    if training:
+      return tf.reduce_sum(example['image/object/num_keypoints']) > 0
+    else:
+      return tf.shape(example['image/object/bbox/xmin'])[0] > 0
+
+  def set_invisible_points(self, keypoints):
+    segs = []
+    num_points = np.shape(keypoints)[1] // 3
+    for seg in keypoints:
+      out = []
+      for i in range(num_points):
+        if seg[i * 3 + 2] == 0:  # Not labeled
+          seg[i * 3] = seg[i * 3 + 1] = vocab.INVISIBLE_FLOAT
+        out.extend([seg[i * 3], seg[i * 3 + 1]])  # Drop visibility flags.
+      segs.append(out)
+    return np.asarray(segs, dtype=np.float32)
+
+  def extract(self, example, training):
+    """Extracts needed features & annotations into a flat dictionary.
+
+    Note:
+      - label starts at 1 instead of 0, as 0 is reserved for special use
+        (such as padding).
+      - coordinates (e.g. bbox) are (normalized to be) in [0, 1].
+
+    Args:
+      example: `dict` of raw features.
+      training: `bool` of training vs eval mode.
+
+    Returns:
+      example: `dict` of relevant features and labels.
+    """
+    features = {
+        'image': decode_utils.decode_image(example),
+        'image/id': tf.strings.to_number(example['image/source_id'], tf.int64),
+    }
+
+    max_points = self.task_config.max_points_per_object
+    keypoints = example['image/object/keypoints'].to_tensor(
+        default_value=vocab.PADDING_FLOAT, shape=[None, max_points * 3])
+    keypoints = tf.numpy_function(self.set_invisible_points, (keypoints,),
+                                  tf.float32)
+    keypoints.set_shape([None, max_points * 2])
+    keypoints = _xy_to_yx(keypoints)
+
+    bbox = decode_utils.decode_boxes(example)
+    num_keypoints = example['image/object/num_keypoints']
+    labels = example['image/object/class/label']
+    iscrowd = decode_utils.decode_is_crowd(example)
+    areas = decode_utils.decode_areas(example)
+    scores = decode_utils.decode_scores(example)
+
+    # Only keep non-crowded person objects during both training and eval.
+    is_valid = tf.logical_and(
+        tf.logical_and(tf.equal(labels, 1), tf.logical_not(iscrowd)),
+        tf.math.greater_equal(scores, self.task_config.min_bbox_score))
+
+    if training:  # Drop person without any anno keypoints during training.
+      has_keypoints = tf.greater(num_keypoints, 0)
+      is_valid = tf.logical_and(is_valid, has_keypoints)
+
+    bbox = tf.boolean_mask(bbox, is_valid)
+    iscrowd = tf.boolean_mask(iscrowd, is_valid)
+    labels = tf.boolean_mask(labels, is_valid)
+    areas = tf.boolean_mask(areas, is_valid)
+    keypoints = tf.boolean_mask(keypoints, is_valid)
+    num_keypoints = tf.boolean_mask(num_keypoints, is_valid)
+    scores = tf.boolean_mask(scores, is_valid)
+
+    scale = 1. / utils.tf_float32(tf.shape(features['image'])[:2])
+    labels = {
+        'label': labels,
+        'bbox': utils.scale_points(bbox, scale),
+        'area': areas,
+        'is_crowd': iscrowd,
+        'keypoints': utils.scale_points(keypoints, scale),
+        'num_keypoints': num_keypoints,
+        'scores': scores
+    }
+
+    return features, labels
+
+
+@dataset_lib.DatasetRegistry.register('coco/2017_captioning')
+class CocoCaptioningTFRecordDataset(dataset_lib.TFRecordDataset):
+  """Coco captioning dataset."""
+
+  def get_feature_map(self):
+    """Returns feature map for parsing the TFExample."""
+    image_feature_map = decode_utils.get_feature_map_for_image()
+    cap_feature_map = decode_utils.get_feature_map_for_captioning()
+    return {**image_feature_map, **cap_feature_map}
+
+  def filter_example(self, example, training):
+    # Filter out examples without captions.
+    if training:
+      return tf.shape(example['image/caption'])[0] > 0
+    else:
+      return True
+
+  def extract(self, example, training):
+    """Extracts needed features & annotations into a flat dictionary.
+
+    Note:
+      - label starts at 1 instead of 0, as 0 is reserved for special use
+        (such as padding).
+      - coordinates (e.g. bbox) are (normalized to be) in [0, 1].
+
+    Args:
+      example: `dict` of raw features.
+      training: `bool` of training vs eval mode.
+
+    Returns:
+      example: `dict` of relevant features and labels.
+    """
+    features = {
+        'image': decode_utils.decode_image(example),
+        'image/id': tf.strings.to_number(example['image/source_id'], tf.int64),
+    }
+
+    labels = {
+        'captions':
+            example['image/caption'][:self.task_config.captions_per_image],
+    }
+
+    return features, labels

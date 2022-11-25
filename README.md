@@ -39,6 +39,13 @@ ViT-L          | 341.2            | 640x640    | 47.6      | [gs://pix2seq/coco_
 ViT-L          | 341.2            | 1024x1024  | 49.2      | [gs://pix2seq/coco_det_finetune/vit_l_1024x1024](https://console.cloud.google.com/storage/browser/pix2seq/coco_det_finetune/vit_l_1024x1024)
 ViT-L          | 341.2            | 1333x1333  | 50.0      | [gs://pix2seq/coco_det_finetune/vit_l_1333x1333](https://console.cloud.google.com/storage/browser/pix2seq/coco_det_finetune/vit_l_1333x1333)
 
+### Multitask checkpoints
+Jointly fine-tuned on coco object detection, instance segmentation, captioning and keypoint detection.
+
+Backbone       | Total params (M) | Image size | COCO AP   | Google cloud storage location
+-------------: | ---------------: | ---------: | --------: | -----------:
+ViT-B          | 115.2            | 640x640    | 44.2      | [gs://pix2seq/multi_task/ckpt/vit_b_640x640](https://console.cloud.google.com/storage/browser/pix2seq/multi_task/ckpt/vit_b_640x640)
+ViT-B          | 115.2            | 1024x1024  | 46.5      | [gs://pix2seq/multi_task/ckpt/vit_b_1024x1024](https://console.cloud.google.com/storage/browser/pix2seq/multi_task/ckpt/vit_b_1024x1024)
 
 ## Usage
 
@@ -50,15 +57,22 @@ See [colabs](colabs) for inference and fine-tuning demos. Give [it](https://cola
 ### Basic setup before running the code
 
 The following setup is required before running the code.
+
 ```
 git clone https://github.com/google-research/pix2seq.git
 pip install -r requirements.txt
 ```
 
-Download COCO annotations if neccesary (note that COCO images will be automatically downloaded by [TFDS](https://www.tensorflow.org/datasets)).
+Download COCO annotations from [gs://pix2seq/multi_task/data/coco/json](https://console.cloud.google.com/storage/browser/pix2seq/multi_task/data/coco/json) to `/tmp/coco_annotations` (dir can be updated in the configs).
+
 ```
-wget -c http://images.cocodataset.org/annotations/annotations_trainval2017.zip
-unzip annotations_trainval2017.zip
+annotations_dir=/tmp/coco_annotations
+wget https://storage.googleapis.com/pix2seq/multi_task/data/coco/json/captions_train2017_eval_compatible.json $annotations_dir
+wget https://storage.googleapis.com/pix2seq/multi_task/data/coco/json/captions_val2017_eval_compatible.json $annotations_dir
+wget https://storage.googleapis.com/pix2seq/multi_task/data/coco/json/instances_train2017.json $annotations_dir
+wget https://storage.googleapis.com/pix2seq/multi_task/data/coco/json/instances_val2017.json $annotations_dir
+wget https://storage.googleapis.com/pix2seq/multi_task/data/coco/json/person_keypoints_train2017.json $annotations_dir
+wget https://storage.googleapis.com/pix2seq/multi_task/data/coco/json/person_keypoints_val2017.json $annotations_dir
 ```
 
 (Optional) If accessing the pretrained checkpoints in Cloud is slowing down or blocking the start of training/eval, you can download them manually with following command `gsutil cp -r gs://cloud_folder local_folder`, and update `pretrained_ckpt` in the config file accordingly.
@@ -69,24 +83,76 @@ unzip annotations_trainval2017.zip
 
 Below is the instruction for starting a training job, where we've set up a configuration mainly for fine-tuning the objects365 pretrained models.
 
-Step 1: check [config_det_finetune.py](configs/config_det_finetune.py) and update if neccesary, such as `encoder_variant`, `image_size`.
+Step 1: check [config_det_finetune.py](configs/config_det_finetune.py) and update if necessary, such as `encoder_variant`, `image_size`.
 
-Step 2: run `python3 run.py --mode=train --model_dir=/tmp/model_dir --config=configs/config_det_finetune.py --config.dataset.coco_annotations_dir=/path/to/annotations --config.train.batch_size=32 --config.train.epochs=20 --config.optimization.learning_rate=3e-5`.
+Step 2: run `python3 run.py --mode=train --model_dir=/tmp/model_dir --config=configs/config_det_finetune.py --config.train.batch_size=32 --config.train.epochs=20 --config.optimization.learning_rate=3e-5`.
 
 (Optional) Setup tensorboard for training curves with `tensorboard --logdir=/tmp/model_dir`. Note: eval on this drill fine-tuning run (with vit-b 640x640 and 20 epochs) should give ~43.5 AP. Exact configurations used to reproduce the COCO fine-tuning results can be found in gs://pix2seq/coco_det_finetune/...
 
-(Optional) Set `--run_eagerly=True` for interactive debuging (which will be slower).
+(Optional) Set `--run_eagerly=True` for interactive debugging (which will be slower).
 
 ### Instructions for evaluation of object detection models.
 
 Below is the instruction for starting an evaluation job, which monitors the specified directory and perform (continuous) evaluation of the latest and un-evaluated checkpoints. It can be started in parallel to or after the training.
 
-Step 1: check [config_det_finetune.py](configs/config_det_finetune.py) and update if neccesary, such as `encoder_variant`, `image_size`. Set `checkpoint_dir` if the checkpoints to evaluate are not in `model_dir` (e.g., for evaluating our provided fine-tuning checkpoints).
+Step 1: check [config_det_finetune.py](configs/config_det_finetune.py) and update if necessary, such as `encoder_variant`, `image_size`. Set `checkpoint_dir` if the checkpoints to evaluate are not in `model_dir` (e.g., for evaluating our provided fine-tuning checkpoints).
 
 Step 2: run `python3 run.py --mode=eval --model_dir=/tmp/model_dir --config=configs/config_det_finetune.py --config.dataset.coco_annotations_dir=/path/to/annotations --config.eval.batch_size=40`.
 
 (Optional) Setup tensorboard for eval curves and detection visualizations with `tensorboard --logdir=/tmp/model_dir`.
 
+### Instructions for evaluation of multi-task models.
+In `configs/config_multi_task.py` uncomment the line with `checkpoint_dir=get_multi_task_checkpoint_dir(...)`.
+To evaluate for image size `1024x1024` update `image_size` in the config.
+
+#### Object detection
+
+```
+config=configs/config_multi_task.py:object_detection@coco/2017_object_detection,vit-b
+model_dir=/tmp/pix2seq_eval_det
+# Path to save the detected boxes for evaluating other tasks.
+boxes_json_path=$model_dir/boxes.json
+python3 run.py --config=$config --model_dir=$model_dir --mode=eval --config.task.eval_outputs_json_path=$boxes_json_path
+```
+
+(Optional) In order to use the detected boxes generated in the previous step for eval of instance segmentation and keypoint detection, they need to be converted to tfrecords using the command below. Alternatively you can use the pre-processed tfrecords that we have provided.
+
+```
+box_tfrecords=/tmp/boxes
+python3 data/scripts/merge_coco_json_tfrecord.py --tfrecord_path=gs://pix2seq/multi_task/data/coco/tfrecord/val* --annotation_path=$boxes_json_path  --output_dir=$box_tfrecords
+```
+
+#### Instance segmentation
+
+```
+config=configs/config_multi_task.py:instance_segmentation@coco/2017_instance_segmentation,vit-b
+val_file_pattern=gs://pix2seq/multi_task/data/coco/det_boxes/vit_b_640x640/*.tfrecord
+# val_file_pattern=$box_tfrecords/*.tfrecord
+# Number of masks to aggregate. Reduce this for faster but lower quality eval. 
+num_samples=8
+model_dir=/tmp/pix2seq_eval_ins
+python3 run.py --config=$config --model_dir=$model_dir --mode=eval --config.dataset.val_file_pattern=$val_file_pattern --config.task.ensemble_num_samples=$num_samples
+```
+
+#### Keypoint detection
+```
+config="configs/config_multi_task.py:keypoint_detection@coco/2017_keypoint_detection,vit-b"
+val_file_pattern=gs://pix2seq/multi_task/data/coco/det_boxes/vit_b_640x640/*.tfrecord
+# val_file_pattern=$box_tfrecords/*.tfrecord
+model_dir=/tmp/pix2seq_eval_key
+python3 run.py --config=$config --model_dir=$model_dir --mode=eval --config.dataset.val_file_pattern=$val_file_pattern
+```
+
+#### Captioning
+```
+config=configs/config_multi_task.py:captioning@coco/2017_captioning,vit-b
+model_dir=/tmp/pix2seq_eval_cap
+python3 run.py --config=$config --model_dir=$model_dir --mode=eval
+```
+
+For captioning, the generated captions are written to `$model_dir/coco_result_{step}_{uuid.uuid4()}.json`. Metrics can be computed using the official coco scripts.
+
+Note: You can run eval on a subset of images by setting `--config.eval.steps`.
 
 ## Cite
 
@@ -101,6 +167,16 @@ Step 2: run `python3 run.py --mode=eval --model_dir=/tmp/model_dir --config=conf
 }
 ```
 
+[Pix2seq multi-task paper](https://arxiv.org/abs/2206.07669):
+
+```
+@article{chen2022unified,
+  title={A Unified Sequence Interface for Vision Tasks},
+  author={Chen, Ting and Saxena, Saurabh and Li, Lala and Lin, Tsung-Yi and Fleet, David J. and Hinton, Geoffrey},
+  journal={arXiv preprint arXiv:2206.07669},
+  year={2022}
+}
+```
 
 ## Disclaimer
 This is not an officially supported Google product.

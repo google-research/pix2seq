@@ -42,14 +42,14 @@ class Model(tf.keras.models.Model):
     mlp_ratio = config.dim_mlp // config.dim_att
     if config.resnet_variant == 'c1':
       self.encoder = VisionTransformer(
-          config.image_size, config.image_size, config.patch_size,
+          config.image_size[0], config.image_size[1], config.patch_size,
           config.num_encoder_layers, config.dim_att, mlp_ratio,
           config.num_heads, config.drop_path, config.drop_units,
           config.drop_att, config.pos_encoding, config.use_cls_token,
           name='vit')
     else:
       self.encoder = ResNetTransformer(
-          config.image_size, config.image_size, config.resnet_variant,
+          config.image_size[0], config.image_size[1], config.resnet_variant,
           config.resnet_depth, config.resnet_width_multiplier,
           config.resnet_sk_ratio, config.num_encoder_layers, config.dim_att,
           mlp_ratio, config.num_heads, config.drop_path, config.drop_units,

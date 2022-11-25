@@ -58,21 +58,25 @@ class WarmUpAndDecay(tf.keras.optimizers.schedules.LearningRateSchedule):
       cosine_decay = tf.keras.optimizers.schedules.CosineDecay(
           base_lr, total_steps - warmup_steps, alpha=end_lr_factor)
       decayed_lr = cosine_decay(step - warmup_steps)
+    elif schedule.startswith('cosine@'):  # Take a part of the cosine curve.
+      rate = float(schedule.split('@')[1])
+      cosine_decay = tf.keras.optimizers.schedules.CosineDecay(
+          base_lr, (total_steps - warmup_steps) / rate, alpha=end_lr_factor)
+      decayed_lr = cosine_decay(step - warmup_steps)
     elif schedule.startswith('exp@'):
-      assert end_lr_factor == 0, 'non-zero end_lr not supported'
       rate = float(schedule.split('@')[1])
       exp_decay = tf.keras.optimizers.schedules.ExponentialDecay(
           base_lr, total_steps - warmup_steps, rate)
       decayed_lr = exp_decay(step - warmup_steps)
     elif schedule == 'none':
-      assert end_lr_factor == 0, 'non-zero end_lr not supported'
       decayed_lr = base_lr
     else:
       raise ValueError('Unknown learnig rate schedule {}'.format(
           schedule))
 
     learning_rate_warmup = (
-        step / float(warmup_steps) * base_lr if warmup_steps else base_lr)
+        tf.cast(step, tf.float32) / float(warmup_steps) * base_lr
+        if warmup_steps else base_lr)
     learning_rate = tf.where(step < warmup_steps, learning_rate_warmup,
                              decayed_lr)
     return learning_rate
@@ -102,10 +106,12 @@ class AdamWeightDecay(tf.keras.optimizers.Adam):
                name='AdamWeightDecay',
                **kwargs):
     super(AdamWeightDecay, self).__init__(learning_rate, beta_1, beta_2,
-                                          epsilon, amsgrad, name, **kwargs)
+                                          epsilon, amsgrad, name=name, **kwargs)
     self.weight_decay_rate = weight_decay_rate
     self._include_in_weight_decay = include_in_weight_decay
     self._exclude_from_weight_decay = exclude_from_weight_decay
+    if include_in_weight_decay is None and exclude_from_weight_decay is None:
+      raise ValueError('Sepcify wd variables using one of include, exclude.')
 
   def _prepare_local(self, var_device, var_dtype, apply_state):
     super(AdamWeightDecay, self)._prepare_local(var_device, var_dtype,
@@ -165,11 +171,14 @@ class AdamWeightDecay(tf.keras.optimizers.Adam):
       for r in self._include_in_weight_decay:
         if re.search(r, param_name) is not None:
           return True
+      return False
 
     if self._exclude_from_weight_decay:
       for r in self._exclude_from_weight_decay:
         if re.search(r, param_name) is not None:
           return False
+      return True
+
     return True
 
 
@@ -192,8 +201,10 @@ def build_optimizer(config, learning_rate):
         beta_1=config.beta1,
         beta_2=config.beta2,
         epsilon=config.eps,
-        include_in_weight_decay=['kernel'],
-        global_clipnorm=clipnorm)
+        global_clipnorm=clipnorm,
+        include_in_weight_decay=config.get('include_in_weight_decay',
+                                           ['kernel']),
+        exclude_from_weight_decay=config.get('exclude_from_weight_decay', []))
   elif config.optimizer == 'lamb':
     return tfa.optimizers.LAMB(
         learning_rate=learning_rate,
@@ -201,7 +212,8 @@ def build_optimizer(config, learning_rate):
         beta_1=config.beta1,
         beta_2=config.beta2,
         epsilon=config.eps,
-        exclude_from_weight_decay=['bias', 'beta', 'gamma', 'emb'])
+        exclude_from_weight_decay=config.get('exclude_from_weight_decay',
+                                             ['bias', 'beta', 'gamma']))
   else:
     raise ValueError('Unknown optimizer {}'.format(config.optimizer))
 

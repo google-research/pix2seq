@@ -89,14 +89,16 @@ def get_2d_position_codes(height, width, out_dim, normalization_max=6.2831852):
   """
   y_coords = tf.cast(tf.range(height), tf.float32)
   if normalization_max is not None:
-    y_coords = y_coords / (height - 1) * normalization_max
+    y_coords = (
+        y_coords / tf.cast(height - 1, dtype=tf.float32) * normalization_max)
   y_coords = positional_encoding(y_coords, out_dim//2)
   y_coords = tf.expand_dims(y_coords, 2)
   y_coords = tf.concat([y_coords, tf.zeros_like(y_coords)], -1)
 
   x_coords = tf.cast(tf.range(width), tf.float32)
   if normalization_max is not None:
-    x_coords = x_coords / (width - 1) * normalization_max
+    x_coords = (
+        x_coords / tf.cast(width - 1, dtype=tf.float32) * normalization_max)
   x_coords = positional_encoding(x_coords, out_dim//2)
   x_coords = tf.expand_dims(x_coords, 1)
   x_coords = tf.concat([tf.zeros_like(x_coords), x_coords], -1)
@@ -128,23 +130,37 @@ def add_seq_pos_emb(self, pos_encoding, max_seq_len, dim,
     raise ValueError('Unknown pos encoding %s' % pos_encoding)
 
 
-def add_vis_pos_emb(self, pos_encoding, n_rows, n_cols, dim,
-                    name_prefix=None, initializer=None):
+def add_vis_pos_emb(self,
+                    pos_encoding,
+                    n_rows,
+                    n_cols,
+                    dim,
+                    name_prefix=None,
+                    initializer=None,
+                    return_only=False,
+                    normalization_max=6.2831852):
   """Add vis_pos_emb variable/tensor to model instance referenced by `self`."""
   if name_prefix is None:
     name_prefix = self.name
   if initializer is None:
     initializer = get_variable_initializer()
   if pos_encoding == 'learned':
-    self.vis_pos_emb = self.add_weight(
+    vis_pos_emb = self.add_weight(
         shape=(n_rows * n_cols, dim), initializer=initializer,
         name='%s/vis_pos_embedding' % name_prefix)
   elif pos_encoding == 'sin_cos':
-    sin_cos = get_2d_position_codes(
-        n_rows, n_cols, dim, normalization_max=6.2831852)
-    self.vis_pos_emb = tf.reshape(sin_cos, [n_rows * n_cols, dim])
+    if n_rows == 1 or n_cols == 1:
+      sin_cos = get_1d_position_codes(
+          n_rows * n_cols, dim, normalization_max=normalization_max)
+    else:
+      sin_cos = get_2d_position_codes(
+          n_rows, n_cols, dim, normalization_max=normalization_max)
+    vis_pos_emb = tf.reshape(sin_cos, [n_rows * n_cols, dim])
   else:
     raise ValueError('Unknown pos encoding %s' % pos_encoding)
+  if not return_only:
+    self.vis_pos_emb = vis_pos_emb
+  return vis_pos_emb
 
 
 def add_cls_token_emb(self, dim, name_prefix=None, initializer=None):
@@ -341,15 +357,29 @@ class DropPath(tf.keras.layers.Layer):
 
 class FeedForwardLayer(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
 
-  def __init__(self, dim_att, dim_mlp, drop_units=0.1, **kwargs):
+  def __init__(self,
+               dim_att,
+               dim_mlp,
+               drop_units=0.1,
+               use_ln=False,
+               ln_scale_shift=False,
+               **kwargs):
     super(FeedForwardLayer, self).__init__(**kwargs)
     self.dense1 = tf.keras.layers.Dense(
         dim_mlp, activation=tf.nn.gelu, name='dense1')
     self.dropout = tf.keras.layers.Dropout(drop_units)
     self.dense2 = tf.keras.layers.Dense(dim_att, name='dense2')
+    if use_ln:
+      self.ln = tf.keras.layers.LayerNormalization(
+          epsilon=1e-6,
+          center=ln_scale_shift,
+          scale=ln_scale_shift,
+          name='mlp_ln')
+    else:
+      self.ln = lambda x: x
 
   def call(self, x, training):
-    return self.dense2(self.dropout(self.dense1(x), training=training))
+    return self.dense2(self.dropout(self.ln(self.dense1(x)), training=training))
 
 
 class MLP(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
@@ -360,17 +390,23 @@ class MLP(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
                mlp_ratio,
                drop_path=0.1,
                drop_units=0.,
+               use_ffn_ln=False,
+               ln_scale_shift=True,
                **kwargs):
     super(MLP, self).__init__(**kwargs)
     self.num_layers = num_layers
     self.mlp_layers = [
         FeedForwardLayer(dim, dim * mlp_ratio, drop_units,
+                         use_ln=use_ffn_ln, ln_scale_shift=ln_scale_shift,
                          name='ffn' + suffix_id(i))
         for i in range(num_layers)
     ]
     self.layernorms = [
         tf.keras.layers.LayerNormalization(
-            epsilon=1e-6, name='ffn/ln' + suffix_id(i))
+            epsilon=1e-6,
+            center=ln_scale_shift,
+            scale=ln_scale_shift,
+            name='ffn/ln' + suffix_id(i))
         for i in range(num_layers)
     ]
     self.dropp = DropPath(drop_path)
@@ -393,13 +429,20 @@ class TransformerEncoderLayer(tf.keras.layers.Layer):  # pylint: disable=missing
                drop_path=0.1,
                drop_units=0.1,
                drop_att=0.,
+               use_ffn_ln=False,
+               ln_scale_shift=True,
                **kwargs):
     super(TransformerEncoderLayer, self).__init__(**kwargs)
     self.mha_ln = tf.keras.layers.LayerNormalization(
-        epsilon=1e-6, name='mha/ln')
+        epsilon=1e-6,
+        center=ln_scale_shift,
+        scale=ln_scale_shift,
+        name='mha/ln')
     self.mha = tf.keras.layers.MultiHeadAttention(
         num_heads, dim // num_heads, dropout=drop_att, name='mha')
-    self.mlp = MLP(1, dim, mlp_ratio, drop_path, drop_units, name='mlp')
+    self.mlp = MLP(1, dim, mlp_ratio, drop_path, drop_units,
+                   use_ffn_ln=use_ffn_ln, ln_scale_shift=ln_scale_shift,
+                   name='mlp')
     self.dropp = DropPath(drop_path)
 
   def call(self, x, mask, training):
@@ -421,12 +464,15 @@ class TransformerEncoder(tf.keras.layers.Layer):  # pylint: disable=missing-docs
                drop_path=0.1,
                drop_units=0.1,
                drop_att=0.,
+               use_ffn_ln=False,
+               ln_scale_shift=True,
                **kwargs):
     super(TransformerEncoder, self).__init__(**kwargs)
     self.num_layers = num_layers
     self.enc_layers = [
         TransformerEncoderLayer(  # pylint: disable=g-complex-comprehension
             dim, mlp_ratio, num_heads, drop_path, drop_units, drop_att,
+            use_ffn_ln=use_ffn_ln, ln_scale_shift=ln_scale_shift,
             name='transformer_encoder' + suffix_id(i))
         for i in range(num_layers)
     ]
@@ -448,23 +494,47 @@ class TransformerDecoderLayer(tf.keras.layers.Layer):  # pylint: disable=missing
                drop_path=0.1,
                drop_units=0.1,
                drop_att=0.,
+               dim_x_att=None,
                self_attention=True,
                cross_attention=True,
+               use_mlp=True,
+               use_enc_ln=False,
+               use_ffn_ln=False,
+               ln_scale_shift=True,
                **kwargs):
     super(TransformerDecoderLayer, self).__init__(**kwargs)
     self.self_attention = self_attention
     self.cross_attention = cross_attention
+    self.use_mlp = use_mlp
     if self_attention:
       self.self_ln = tf.keras.layers.LayerNormalization(
-          epsilon=1e-6, name='self_mha/ln')
+          epsilon=1e-6,
+          center=ln_scale_shift,
+          scale=ln_scale_shift,
+          name='self_mha/ln')
       self.self_mha = tf.keras.layers.MultiHeadAttention(
           num_heads, dim // num_heads, dropout=drop_att, name='self_mha')
     if cross_attention:
       self.cross_ln = tf.keras.layers.LayerNormalization(
-          epsilon=1e-6, name='cross_mha/ln')
+          epsilon=1e-6,
+          center=ln_scale_shift,
+          scale=ln_scale_shift,
+          name='cross_mha/ln')
+      if use_enc_ln:
+        self.enc_ln = tf.keras.layers.LayerNormalization(
+            epsilon=1e-6,
+            center=ln_scale_shift,
+            scale=ln_scale_shift,
+            name='cross_mha/enc_ln')
+      else:
+        self.enc_ln = lambda x: x
+      dim_x_att = dim if dim_x_att is None else dim_x_att
       self.cross_mha = tf.keras.layers.MultiHeadAttention(
-          num_heads, dim // num_heads, dropout=drop_att, name='cross_mha')
-    self.mlp = MLP(1, dim, mlp_ratio, drop_path, drop_units, name='mlp')
+          num_heads, dim_x_att // num_heads, dropout=drop_att, name='cross_mha')
+    if use_mlp:
+      self.mlp = MLP(1, dim, mlp_ratio, drop_path, drop_units,
+                     use_ffn_ln=use_ffn_ln, ln_scale_shift=ln_scale_shift,
+                     name='mlp')
     self.dropp = DropPath(drop_path)
 
   def call(self, x, enc, cache, mask_self, mask_cross, training):
@@ -480,9 +550,11 @@ class TransformerDecoderLayer(tf.keras.layers.Layer):  # pylint: disable=missing
       x = x + self.dropp(x_res, training)
     if self.cross_attention:
       x_ln = self.cross_ln(x)
+      enc = self.enc_ln(enc)
       x_res = self.cross_mha(x_ln, enc, enc, mask_cross, training=training)
       x = x + self.dropp(x_res, training)
-    x = self.mlp(x, training)
+    if self.use_mlp:
+      x = self.mlp(x, training)
     return x, x_for_cache
 
 
@@ -496,15 +568,31 @@ class TransformerDecoder(tf.keras.layers.Layer):  # pylint: disable=missing-docs
                drop_path=0.1,
                drop_units=0.1,
                drop_att=0.,
+               dim_x_att=None,
                self_attention=True,
                cross_attention=True,
+               use_mlp=True,
+               use_enc_ln=False,
+               use_ffn_ln=False,
+               ln_scale_shift=True,
                **kwargs):
     super(TransformerDecoder, self).__init__(**kwargs)
     self.num_layers = num_layers
     self.dec_layers = [
         TransformerDecoderLayer(  # pylint: disable=g-complex-comprehension
-            dim, mlp_ratio, num_heads, drop_path, drop_units, drop_att,
-            self_attention, cross_attention,
+            dim,
+            mlp_ratio,
+            num_heads,
+            drop_path,
+            drop_units,
+            drop_att,
+            dim_x_att=dim_x_att,
+            self_attention=self_attention,
+            cross_attention=cross_attention,
+            use_mlp=use_mlp,
+            use_enc_ln=use_enc_ln,
+            use_ffn_ln=use_ffn_ln,
+            ln_scale_shift=ln_scale_shift,
             name='transformer_decoder_layer' + suffix_id(i))
         for i in range(num_layers)
     ]
@@ -635,7 +723,7 @@ class ResNetTransformer(tf.keras.layers.Layer):  # pylint: disable=missing-docst
     tokens, x_list = self.transformer_encoder(
         tokens, None, training=training, ret_list=True)
     x = self.output_ln(tokens)
-    return (x, x_list) if ret_list else x
+    return (x, hidden_stack) if ret_list else x
 
 
 class AutoregressiveDecoder(tf.keras.layers.Layer):  # pylint: disable=missing-docstring

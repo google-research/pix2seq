@@ -27,11 +27,15 @@ import ml_collections
 from ml_collections.config_flags import config_flags
 
 import utils
-from data import coco  # pylint: disable=unused-import
 from data import dataset as dataset_lib
+from data import datasets  # pylint: disable=unused-import
+from metrics import coco_metrics  # pylint: disable=unused-import
 from models import ar_model  # pylint: disable=unused-import
 from models import model as model_lib
 # pylint: disable=unused-import
+from tasks import captioning
+from tasks import instance_segmentation
+from tasks import keypoint_detection
 from tasks import object_detection
 # pylint: enable=unused-import
 from tasks import task as task_lib
@@ -189,11 +193,14 @@ def perform_training(config, datasets, tasks, train_steps, steps_per_loop,
       logging.info('Completed: {} / {} steps ({:.2f}%), ETA {:.2f} mins'.format(
           cur_step, train_steps, progress, eta))
       trainer.reset()
+    logging.info('###########################################')
     logging.info('Training complete...')
+    logging.info('###########################################')
 
 
 def main(unused_argv):
-  tf.config.run_functions_eagerly(FLAGS.run_eagerly)
+  if FLAGS.run_eagerly:
+    tf.config.run_functions_eagerly(True)
   strategy = utils.build_strategy(FLAGS.use_tpu, FLAGS.master)
 
 

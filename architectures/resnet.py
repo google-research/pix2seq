@@ -57,7 +57,8 @@ class BatchNormRelu(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
           epsilon=BATCH_NORM_EPSILON,
           center=center,
           scale=scale,
-          gamma_initializer=gamma_initializer)
+          gamma_initializer=gamma_initializer,
+          name='gn')
     else:
       if global_bn:
         self.bn = tf.keras.layers.experimental.SyncBatchNormalization(
@@ -67,7 +68,8 @@ class BatchNormRelu(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
             center=center,
             scale=scale,
             fused=False,  # note: syncBN doesn't support fuse.
-            gamma_initializer=gamma_initializer)
+            gamma_initializer=gamma_initializer,
+            name='global_bn')
       else:
         self.bn = tf.keras.layers.BatchNormalization(
             axis=axis,
@@ -76,7 +78,8 @@ class BatchNormRelu(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
             center=center,
             scale=scale,
             fused=fused,  # note: fused=True only support 4D input tensors.
-            gamma_initializer=gamma_initializer)
+            gamma_initializer=gamma_initializer,
+            name='bn')
 
   def call(self, inputs, training):
     if self.groups > 0:
@@ -212,7 +215,8 @@ class Conv2dFixedPadding(tf.keras.layers.Layer):  # pylint: disable=missing-docs
         padding=('SAME' if strides == 1 else 'VALID'),
         use_bias=False,
         kernel_initializer=tf.keras.initializers.VarianceScaling(),
-        data_format=data_format)
+        data_format=data_format,
+        name='conv2d')
 
   def call(self, inputs, training):
     if self.fixed_padding:
@@ -248,8 +252,10 @@ class SK_Conv2D(tf.keras.layers.Layer):  # pylint: disable=invalid-name
         filters=2 * filters,
         kernel_size=3,
         strides=strides,
-        data_format=data_format)
-    self.batch_norm_relu = BatchNormRelu(data_format=data_format, groups=groups)
+        data_format=data_format,
+        name='conv2d_fixed_padding')
+    self.batch_norm_relu = BatchNormRelu(data_format=data_format, groups=groups,
+                                         name='bn_relu')
 
     # Mixing weights for two streams.
     mid_dim = max(int(filters * sk_ratio), min_dim)
@@ -259,16 +265,18 @@ class SK_Conv2D(tf.keras.layers.Layer):  # pylint: disable=invalid-name
         strides=1,
         kernel_initializer=tf.keras.initializers.VarianceScaling(),
         use_bias=False,
-        data_format=data_format)
+        data_format=data_format,
+        name='conv2d_0')
     self.batch_norm_relu_1 = BatchNormRelu(data_format=data_format,
-                                           groups=groups)
+                                           groups=groups, name='bn_relu1')
     self.conv2d_1 = tf.keras.layers.Conv2D(
         filters=2 * filters,
         kernel_size=1,
         strides=1,
         kernel_initializer=tf.keras.initializers.VarianceScaling(),
         use_bias=False,
-        data_format=data_format)
+        data_format=data_format,
+        name='conv2d_1')
 
   def call(self, inputs, training):
     channel_axis = 1 if self.data_format == 'channels_first' else 3
@@ -304,7 +312,8 @@ class SE_Layer(tf.keras.layers.Layer):  # pylint: disable=invalid-name
         kernel_initializer=tf.keras.initializers.VarianceScaling(),
         padding='same',
         data_format=data_format,
-        use_bias=True)
+        use_bias=True,
+        name='se_reduce')
     self.se_expand = tf.keras.layers.Conv2D(
         None,  # This is filled later in build().
         kernel_size=[1, 1],
@@ -312,7 +321,8 @@ class SE_Layer(tf.keras.layers.Layer):  # pylint: disable=invalid-name
         kernel_initializer=tf.keras.initializers.VarianceScaling(),
         padding='same',
         data_format=data_format,
-        use_bias=True)
+        use_bias=True,
+        name='se_expand')
 
   def build(self, input_shape):
     self.se_expand.filters = input_shape[-1]
@@ -355,40 +365,47 @@ class ResidualBlock(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
                 pool_size=2,
                 strides=strides,
                 padding='SAME' if strides == 1 else 'VALID',
-                data_format=data_format))
+                data_format=data_format,
+                name='shortcut_avgpool2d'))
         self.shortcut_layers.append(
             Conv2dFixedPadding(
                 filters=filters,
                 kernel_size=1,
                 strides=1,
-                data_format=data_format))
+                data_format=data_format,
+                name='shortcut_conv2d_fixed_padding'))
       else:
         self.shortcut_layers.append(
             Conv2dFixedPadding(
                 filters=filters,
                 kernel_size=1,
                 strides=strides,
-                data_format=data_format))
+                data_format=data_format,
+                name='shortcut_conv2d_fixed_padding'))
       self.shortcut_layers.append(
-          BatchNormRelu(relu=False, data_format=data_format, groups=groups))
+          BatchNormRelu(relu=False, data_format=data_format, groups=groups,
+                        name='bn_relu'))
 
     self.conv2d_bn_layers.append(
         Conv2dFixedPadding(
             filters=filters,
             kernel_size=3,
             strides=strides,
-            data_format=data_format))
+            data_format=data_format,
+            name='conv2d_fixed_padding'))
     self.conv2d_bn_layers.append(BatchNormRelu(data_format=data_format,
-                                               groups=groups))
+                                               groups=groups, name='bn_relu1'))
     self.conv2d_bn_layers.append(
         Conv2dFixedPadding(
-            filters=filters, kernel_size=3, strides=1, data_format=data_format))
+            filters=filters, kernel_size=3, strides=1, data_format=data_format,
+            name='conv2d_fixed_padding1'))
     self.conv2d_bn_layers.append(
         BatchNormRelu(relu=False, init_zero=True, data_format=data_format,
-                      groups=groups))
+                      groups=groups, name='bn_relu2'))
     self.se_ratio = se_ratio
     if se_ratio > 0:
-      self.se_layer = SE_Layer(filters, se_ratio, data_format=data_format)
+      self.se_layer = SE_Layer(filters, se_ratio, data_format=data_format,
+                               name='se_layer')
 
   def call(self, inputs, training):
     shortcut = inputs
@@ -426,50 +443,59 @@ class BottleneckBlock(tf.keras.layers.Layer):
       filters_out = 4 * filters
       if sk_ratio > 0:  # Use ResNet-D (https://arxiv.org/abs/1812.01187)
         if strides > 1:
-          self.projection_layers.append(FixedPadding(2, data_format))
+          self.projection_layers.append(
+              FixedPadding(2, data_format, name='proj_fixed_padding'))
         self.projection_layers.append(
             tf.keras.layers.AveragePooling2D(
                 pool_size=2,
                 strides=strides,
                 padding='SAME' if strides == 1 else 'VALID',
-                data_format=data_format))
+                data_format=data_format,
+                name='proj_avgpool2d'))
         self.projection_layers.append(
             Conv2dFixedPadding(
                 filters=filters_out,
                 kernel_size=1,
                 strides=1,
-                data_format=data_format))
+                data_format=data_format,
+                name='proj_conv2d_fixed_padding'))
       else:
         self.projection_layers.append(
             Conv2dFixedPadding(
                 filters=filters_out,
                 kernel_size=1,
                 strides=strides,
-                data_format=data_format))
+                data_format=data_format,
+                name='proj_conv2d_fixed_padding'))
       self.projection_layers.append(
-          BatchNormRelu(relu=False, data_format=data_format, groups=groups))
+          BatchNormRelu(relu=False, data_format=data_format, groups=groups,
+                        name='proj_bn_relu'))
     self.shortcut_dropblock = DropBlock(
         data_format=data_format,
         keep_prob=dropblock_keep_prob,
-        dropblock_size=dropblock_size)
+        dropblock_size=dropblock_size,
+        name='shortcut_dropblock')
 
     self.conv_relu_dropblock_layers = []
 
     self.conv_relu_dropblock_layers.append(
-        Conv2dFixedPadding(
-            filters=filters, kernel_size=1, strides=1, data_format=data_format))
+        Conv2dFixedPadding(filters=filters, kernel_size=1, strides=1,
+                           data_format=data_format,
+                           name='conv2d_fixed_padding'))
     self.conv_relu_dropblock_layers.append(
-        BatchNormRelu(data_format=data_format, groups=groups))
+        BatchNormRelu(data_format=data_format, groups=groups,
+                      name='bn_relu'))
     self.conv_relu_dropblock_layers.append(
         DropBlock(
             data_format=data_format,
             keep_prob=dropblock_keep_prob,
-            dropblock_size=dropblock_size))
+            dropblock_size=dropblock_size,
+            name='dropblock'))
 
     if sk_ratio > 0:
       self.conv_relu_dropblock_layers.append(
           SK_Conv2D(filters, strides, sk_ratio, data_format=data_format,
-                    groups=groups))
+                    groups=groups, name='sk_conv2d'))
     else:
       self.conv_relu_dropblock_layers.append(
           Conv2dFixedPadding(
@@ -477,33 +503,39 @@ class BottleneckBlock(tf.keras.layers.Layer):
               kernel_size=3,
               strides=strides,
               dilation=dilation,
-              data_format=data_format))
+              data_format=data_format,
+              name='conv2d_fixed_padding1'))
       self.conv_relu_dropblock_layers.append(
-          BatchNormRelu(data_format=data_format, groups=groups))
+          BatchNormRelu(data_format=data_format, groups=groups,
+                        name='bn_relu1'))
     self.conv_relu_dropblock_layers.append(
         DropBlock(
             data_format=data_format,
             keep_prob=dropblock_keep_prob,
-            dropblock_size=dropblock_size))
+            dropblock_size=dropblock_size,
+            name='dropblock1'))
 
     self.conv_relu_dropblock_layers.append(
         Conv2dFixedPadding(
             filters=4 * filters,
             kernel_size=1,
             strides=1,
-            data_format=data_format))
+            data_format=data_format,
+            name='conv2d_fixed_padding2'))
     self.conv_relu_dropblock_layers.append(
         BatchNormRelu(relu=False, init_zero=True, data_format=data_format,
-                      groups=groups))
+                      groups=groups, name='bn_relu2'))
     self.conv_relu_dropblock_layers.append(
         DropBlock(
             data_format=data_format,
             keep_prob=dropblock_keep_prob,
-            dropblock_size=dropblock_size))
+            dropblock_size=dropblock_size,
+            name='dropblock2'))
 
     if se_ratio > 0:
       self.conv_relu_dropblock_layers.append(
-          SE_Layer(filters, se_ratio, data_format=data_format))
+          SE_Layer(filters, se_ratio, data_format=data_format,
+                   name='se_layer'))
 
   def call(self, inputs, training):
     shortcut = inputs
@@ -547,9 +579,10 @@ class BlockGroup(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
             dropblock_keep_prob=dropblock_keep_prob,
             dropblock_size=dropblock_size,
             sk_ratio=sk_ratio,
-            groups=groups))
+            groups=groups,
+            name='block1'))
 
-    for _ in range(1, blocks):
+    for k in range(1, blocks):
       self.layers.append(
           block_fn(
               filters,
@@ -559,7 +592,8 @@ class BlockGroup(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
               dropblock_keep_prob=dropblock_keep_prob,
               dropblock_size=dropblock_size,
               sk_ratio=sk_ratio,
-              groups=groups))
+              groups=groups,
+              name='block%d'%(k+1)))
 
   def call(self, inputs, training):
     for layer in self.layers:
@@ -597,10 +631,12 @@ class Resnet(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
               filters=64 * width_multiplier,
               kernel_size=3,
               strides=1,
-              data_format=data_format))
+              data_format=data_format,
+              name='stem_conv2d_fixed_padding'))
       self.initial_conv_relu_max_pool.append(IdentityLayer(name='initial_conv'))
       self.initial_conv_relu_max_pool.append(
-          BatchNormRelu(data_format=data_format, groups=groups))
+          BatchNormRelu(data_format=data_format, groups=groups,
+                        name='stem_bn_relu'))
       self.initial_conv_relu_max_pool.append(
           IdentityLayer(name='initial_max_pool'))
     else:
@@ -611,37 +647,45 @@ class Resnet(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
                 filters=64 * width_multiplier // 2,
                 kernel_size=3,
                 strides=1 if self.variant == 'c3' else 2,
-                data_format=data_format))
+                data_format=data_format,
+                name='stem_conv2d_fixed_padding'))
         self.initial_conv_relu_max_pool.append(
-            BatchNormRelu(data_format=data_format, groups=groups))
+            BatchNormRelu(data_format=data_format, groups=groups,
+                          name='stem_bn_relu1'))
         self.initial_conv_relu_max_pool.append(
             Conv2dFixedPadding(
                 filters=64 * width_multiplier // 2,
                 kernel_size=3,
                 strides=1,
-                data_format=data_format))
+                data_format=data_format,
+                name='stem_conv2d_fixed_padding1'))
         self.initial_conv_relu_max_pool.append(
-            BatchNormRelu(data_format=data_format, groups=groups))
+            BatchNormRelu(data_format=data_format, groups=groups,
+                          name='stem_bn_relu2'))
         self.initial_conv_relu_max_pool.append(
             Conv2dFixedPadding(
                 filters=64 * width_multiplier,
                 kernel_size=3,
                 strides=1,
-                data_format=data_format))
+                data_format=data_format,
+                name='stem_conv2d_fixed_padding2'))
       else:
         self.initial_conv_relu_max_pool.append(
             Conv2dFixedPadding(
                 filters=64 * width_multiplier,
                 kernel_size=7,
                 strides=2,
-                data_format=data_format))
+                data_format=data_format,
+                name='stem_conv2d_fixed_padding'))
       self.initial_conv_relu_max_pool.append(IdentityLayer(name='initial_conv'))
       self.initial_conv_relu_max_pool.append(
-          BatchNormRelu(data_format=data_format, groups=groups))
+          BatchNormRelu(data_format=data_format, groups=groups,
+                        name='stem_bn_relu'))
 
       self.initial_conv_relu_max_pool.append(
           tf.keras.layers.MaxPooling2D(
-              pool_size=3, strides=2, padding='SAME', data_format=data_format))
+              pool_size=3, strides=2, padding='SAME', data_format=data_format,
+              name='stem_maxpooling'))
       self.initial_conv_relu_max_pool.append(
           IdentityLayer(name='initial_max_pool'))
 
@@ -767,4 +811,5 @@ def resnet(resnet_depth,
       data_format=data_format,
       sk_ratio=sk_ratio,
       variant=variant,
-      groups=groups)
+      groups=groups,
+      name='resnet')
