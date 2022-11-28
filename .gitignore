@@ -1,0 +1,14 @@
+
+*.pyc
+
+resnet_640x640/coco_det_finetune_resnet_640x640_checkpoint
+
+resnet_640x640/coco_det_finetune_resnet_640x640_ev_object_detection_validation_p0.4cocoeval.pkl
+
+resnet_640x640/coco_det_finetune_resnet_640x640_ev_object_detection_validation_p0.4_result.json
+
+resnet_640x640/coco_det_finetune_resnet_640x640_config.json
+
+resnet_640x640/coco_det_finetune_resnet_640x640_ckpt-71148.index
+
+resnet_640x640/coco_det_finetune_resnet_640x640_ckpt-71148.data-00000-of-00001

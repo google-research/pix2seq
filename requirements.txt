@@ -6,3 +6,4 @@ tensorflow-addons
 tensorflow-text
 pycocotools
 scikit-image
+numpy
