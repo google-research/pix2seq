@@ -268,7 +268,7 @@ def jitter_bbox(bbox, min_range=0., max_range=0.05, truncation=True):
   """Jitter the bbox.
 
   Args:
-    bbox: `float` tensor of shape (n, 4), ranged betwen 0 and 1.
+    bbox: `float` tensor of shape (n, 4), ranged between 0 and 1.
     min_range: min jitter range in ratio to bbox size.
     max_range: max jitter range in ratio to bbox size.
     truncation: whether to truncate resulting bbox to remain [0, 1].
@@ -331,7 +331,7 @@ def augment_bbox(bbox, bbox_label, max_jitter, n_noise_bbox, mix_rate=0.):
     2. Duplicated bbox.
 
   Args:
-    bbox: `float` tensor of shape (n, 4), ranged betwen 0 and 1.
+    bbox: `float` tensor of shape (n, 4), ranged between 0 and 1.
     bbox_label: `int` tensor of shape (n,).
     max_jitter: `float` scalar specifying max jitter range for positive bbox.
     n_noise_bbox: `int` scalar tensor specifying size of the extra noise to add.
