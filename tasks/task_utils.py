@@ -216,3 +216,56 @@ def join_if_not_none(args, sep):
   args = [str(arg) for arg in args if arg is not None]
   return sep.join(args)
 
+
+def integer_map_to_bits(integer_map, n_bits_label, b_scale, num_channels=2):
+  """Converts an integer map to analog bits.
+
+  Args:
+    integer_map: integer tensor of shape [..., num_channels].
+    n_bits_label: integer. Total number of bits of the analog bits.
+    b_scale: float. Scaling of the analog bits.
+    num_channels: integer. Number of channels in the integer map.
+
+  Returns:
+    Analog bits of shape [..., n_bits_label].
+  """
+  bits = []
+  for i in range(num_channels):
+    bits.append(utils.int2bits(
+        integer_map[..., i], n_bits_label//num_channels, tf.float32))
+  bits = tf.concat(bits, -1)
+  bits = (bits * 2 - 1) * b_scale
+  return bits
+
+
+def bits_to_panoptic_map(bits, n_bits_label, num_classes,
+                         max_instances_per_image):
+  """Converts analog bits to a panoptic map.
+
+  Args:
+    bits: float tensor of shape [..., n_bits_label].
+    n_bits_label: integer. Number of bits of the analog bits.
+    num_classes: integer. Number of semantic classes.
+    max_instances_per_image: integer. Maximum number of instances in an image.
+
+  Returns:
+    The integer panoptic map of [..., 2], where the first channel is the
+    semantic map and the second channel is the instance map.
+  """
+  s_map = utils.bits2int(bits[..., :n_bits_label//2] > 0, tf.int32)
+  s_map = tf.minimum(s_map, num_classes - 1)
+  i_map = utils.bits2int(bits[..., n_bits_label//2:] > 0, tf.int32)
+  i_map = tf.minimum(i_map, max_instances_per_image - 1)
+  panoptic_map = tf.stack([s_map, i_map], -1)
+  return panoptic_map
+
+
+def get_normalized_weight(id_map, total_num_ids, p=1.0):
+  """Returns instance normalized weight given id_map (bsz, h, w)."""
+  id_map_hot = tf.one_hot(id_map, total_num_ids)
+  weight = 1. / (tf.reduce_sum(id_map_hot, [1, 2]) + 1)
+  weight = tf.einsum('bhwk,bk->bhw', id_map_hot, weight)
+  weight = tf.pow(weight, p)
+  weight /= tf.reduce_sum(weight, [1, 2], keepdims=True)
+  weight *= tf.cast(tf.math.reduce_prod(tf.shape(id_map)[1:]), weight.dtype)
+  return weight

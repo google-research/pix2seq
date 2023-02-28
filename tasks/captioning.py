@@ -19,7 +19,6 @@ import ml_collections
 
 import utils
 import vocab
-from data import data_utils
 from data import tokenizer as tokenizer_lib
 from metrics import metric_registry
 from tasks import task as task_lib
@@ -61,47 +60,30 @@ class TaskCaptioning(task_lib.Task):
       raise NotImplementedError('Not supporting batch_duplicate=%d > 1 for '
                                 'caption as of now.' % batch_duplicates)
 
-    def _preprocess_single_example(features, labels):
+    def _preprocess_single_example(example):
       config = self.config.task
       mconfig = self.config.model
       if training:
         captions = []
         for i in range(config.captions_per_image):
-          caption = (self._tokenizer.string_to_ids(labels['captions'][i]) +
+          caption = (self._tokenizer.string_to_ids(example['captions'][i]) +
                      mconfig.text_vocab_shift)
           captions.append(utils.pad_to_max_len(caption, config.max_seq_len, -1))
         captions = tf.stack(captions)
 
-        assert config.max_instances_per_image <= config.captions_per_image
-        if config.max_instances_per_image < config.captions_per_image:
-          indices = tf.random.shuffle(
-              tf.range(config.captions_per_image, dtype=tf.int32))
-          indices = indices[:config.max_instances_per_image]
-          captions = tf.gather(captions, indices)
-
-        labels = {'captions': captions}
-
-        features, labels = data_utils.preprocess_train(
-            features,
-            labels,
-            max_instances_per_image=config.max_instances_per_image,
-            max_image_size=config.image_size,
-            color_jitter_strength=config.color_jitter_strength,
-            jitter_scale=(config.jitter_scale_min, config.jitter_scale_max),
-            filter_invalid_labels=False)
+        for t in self.train_transforms:
+          example = t.process_example(example)
+        example['captions'] = captions
       else:
-        features, labels = data_utils.preprocess_eval(
-            features,
-            labels,
-            max_image_size=config.image_size,
-            max_instances_per_image=0)
+        for t in self.eval_transforms:
+          example = t.process_example(example)
 
         # Use the first caption. This  won't be used in eval.
-        caption = (self._tokenizer.string_to_ids(labels['captions'][0]) +
+        caption = (self._tokenizer.string_to_ids(example['captions'][0]) +
                    mconfig.text_vocab_shift)
         caption = utils.pad_to_max_len(caption, config.max_seq_len, -1)
-        labels = {'captions': caption}
-      return features, labels
+        example['captions'] = caption
+      return example
 
     dataset = dataset.map(_preprocess_single_example,
                           num_parallel_calls=tf.data.experimental.AUTOTUNE)
@@ -124,10 +106,9 @@ class TaskCaptioning(task_lib.Task):
     """
     config = self.config.task
     mconfig = self.config.model
-    features, labels = batched_examples
 
     if training:
-      response_seq = labels['captions']  # (bsz, num_captions, max_seq_len)
+      response_seq = batched_examples['captions']  # (bsz, num_cap, max_seq_len)
       prompt_seq = task_utils.build_prompt_seq_from_task_id(
           self.task_vocab_id, response_seq)  # (bsz, 1)
       label_seq = tf.concat([prompt_seq, response_seq], -1)
@@ -141,9 +122,10 @@ class TaskCaptioning(task_lib.Task):
             tf.random.uniform(tf.shape(input_seq)) > config.input_seq_drop_rate,
             input_seq, vocab.FAKE_TEXT_TOKEN)
 
-      return features['image'], input_seq, target_seq, token_weights
+      return batched_examples['image'], input_seq, target_seq, token_weights
     else:
-      return features['image'], labels['captions'], batched_examples
+      return (batched_examples['image'], batched_examples['captions'],
+              batched_examples)
 
   def infer(self, model, preprocessed_outputs):
     """Perform inference given the model and preprocessed outputs."""
@@ -176,9 +158,8 @@ class TaskCaptioning(task_lib.Task):
     Returns:
       results for passing to `postprocess_cpu` which runs in CPU mode.
     """
-    features, labels = batched_examples
-    return (features['image'], features['image/id'], labels['captions'],
-            pred_seq)
+    return (batched_examples['image'], batched_examples['image/id'],
+            batched_examples['captions'], pred_seq)
 
   def postprocess_cpu(self, outputs, train_step,
                       eval_step=None, training=False, summary_tag='eval',

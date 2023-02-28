@@ -60,26 +60,16 @@ class BatchNormRelu(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
           gamma_initializer=gamma_initializer,
           name='gn')
     else:
-      if global_bn:
-        self.bn = tf.keras.layers.experimental.SyncBatchNormalization(
-            axis=axis,
-            momentum=batch_norm_decay,
-            epsilon=BATCH_NORM_EPSILON,
-            center=center,
-            scale=scale,
-            fused=False,  # note: syncBN doesn't support fuse.
-            gamma_initializer=gamma_initializer,
-            name='global_bn')
-      else:
-        self.bn = tf.keras.layers.BatchNormalization(
-            axis=axis,
-            momentum=batch_norm_decay,
-            epsilon=BATCH_NORM_EPSILON,
-            center=center,
-            scale=scale,
-            fused=fused,  # note: fused=True only support 4D input tensors.
-            gamma_initializer=gamma_initializer,
-            name='bn')
+      self.bn = tf.keras.layers.BatchNormalization(
+          axis=axis,
+          momentum=batch_norm_decay,
+          epsilon=BATCH_NORM_EPSILON,
+          center=center,
+          scale=scale,
+          fused=fused,  # note: fused=True only support 4D input tensors.
+          gamma_initializer=gamma_initializer,
+          synchronized=global_bn,
+          name=('global_bn' if global_bn else 'bn'))
 
   def call(self, inputs, training):
     if self.groups > 0:

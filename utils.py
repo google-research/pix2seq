@@ -23,10 +23,10 @@ import logging
 import math
 import operator
 import os
+import time
 import matplotlib
 import matplotlib.cm
 import numpy as np
-import time
 
 import vocab
 import tensorflow as tf
@@ -87,8 +87,7 @@ def int2bits(x, n, out_dtype=None):
 def bits2int(x, out_dtype):
   """Converts bits x in (..., n) into an integer in (...)."""
   x = tf.cast(x, out_dtype)
-  x = tf.reduce_sum((x * 2)**(tf.range(tf.shape(x)[-1])), -1) - tf.cast(
-      x[..., 0] == 0, x.dtype)
+  x = tf.math.reduce_sum(x * (2 ** tf.range(tf.shape(x)[-1])), -1)
   return x
 
 
@@ -132,6 +131,10 @@ def patches2images(patches_list, patch_size):
   return images_list
 
 
+def reduce_non_leading_dims(x, reduce_op=tf.reduce_sum, keepdims=True):
+  return reduce_op(x, range(1, x.shape.ndims), keepdims=keepdims)
+
+
 def tile_along_batch(t, factor):
   """Tile tensor in the first/batch dimension."""
   if factor == 1:
@@ -154,13 +157,13 @@ def shape_as_list(t):
   ]
 
 
-def pad_to_max_len(data, max_len, dim):
+def pad_to_max_len(data, max_len, dim, padding_token=0):
   """Pad the data tensor to max length on dim."""
   shape = shape_as_list(data)
   padding_shape, new_shape = copy.copy(shape), copy.copy(shape)
   padding_shape[dim] = max_len - padding_shape[dim]
   new_shape[dim] = max_len
-  paddings = tf.zeros(padding_shape, dtype=data.dtype)
+  paddings = tf.fill(padding_shape, tf.cast(padding_token, dtype=data.dtype))
   return tf.reshape(tf.concat([data, paddings], axis=dim), new_shape)
 
 

@@ -16,9 +16,12 @@
 """Task base class."""
 
 import abc
+import copy
 from absl import logging
 import ml_collections
 import registry
+import utils
+from data import transforms
 import tensorflow as tf
 
 TaskRegistry = registry.Registry()
@@ -40,6 +43,14 @@ class Task(abc.ABC):
                config: ml_collections.ConfigDict):
     self.config = config
 
+    train_transforms = config.task.get('train_transforms', [])
+    eval_transforms = config.task.get('eval_transforms', [])
+    self.train_transforms = [
+        transforms.TransformRegistry.lookup(t.name)(t)
+        for t in train_transforms]
+    self.eval_transforms = [
+        transforms.TransformRegistry.lookup(t.name)(t) for t in eval_transforms]
+
   @property
   def task_vocab_id(self):
     return self.config.task.vocab_id
@@ -58,6 +69,33 @@ class Task(abc.ABC):
     Returns:
       A dataset.
     """
+
+  def preprocess_single_example(self, example, training, batch_duplicates=1):
+    """Preprocessing of a single example.
+
+    This should be called in preprocess_single.
+
+    Args:
+      example: A dict of name to Tensor.
+      training: bool.
+      batch_duplicates: `int`, enlarge a batch by augmenting it multiple times
+        (as specified) and concating the augmented examples.
+
+    Returns:
+      A dict of name to Tensor.
+    """
+    if training:
+      example_list = []
+      for _ in range(batch_duplicates):
+        example_ = copy.copy(example)
+        for t in self.train_transforms:
+          example_ = t.process_example(example_)
+        example_list.append(example_)
+      example = utils.merge_list_of_dict(example_list)
+    else:
+      for t in self.eval_transforms:
+        example = t.process_example(example)
+    return example
 
   @abc.abstractmethod
   def preprocess_batched(self, batched_examples, training):

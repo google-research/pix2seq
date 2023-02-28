@@ -19,6 +19,7 @@ import copy
 # pylint: disable=invalid-name,line-too-long
 
 from configs import dataset_configs
+from configs import transform_configs
 from configs.config_base import architecture_config_map
 from configs.config_base import D
 
@@ -48,10 +49,10 @@ def get_config(config_str=None):
               quantization_bins=1000,
               max_instances_per_image=100,
               max_instances_per_image_test=100,
-              object_order='random',
-              color_jitter_strength=0.,
-              jitter_scale_min=0.3,
-              jitter_scale_max=2.0,
+              train_transforms=transform_configs.get_object_detection_train_transforms(
+                  image_size, 100),
+              eval_transforms=transform_configs.get_object_detection_eval_transforms(
+                  image_size, 100),
               # Train on both ground-truth and (augmented) noisy objects.
               noise_bbox_weight=1.0,
               eos_token_weight=0.1,
@@ -80,9 +81,10 @@ def get_config(config_str=None):
               max_instances_per_image=10,
               max_instances_per_image_test=10,  # for debug only
               max_points_per_object=128,
-              color_jitter_strength=0.,
-              jitter_scale_min=0.3,
-              jitter_scale_max=1.0,
+              train_transforms=transform_configs.get_instance_segmentation_train_transforms(
+                  image_size, 10),
+              eval_transforms=transform_configs.get_instance_segmentation_eval_transforms(
+                  image_size, 10),
               shuffle_polygon_start_point=False,
               top_k=0,
               top_p=0.8,
@@ -117,9 +119,10 @@ def get_config(config_str=None):
               max_instances_per_image_test=1,
               max_points_per_object=17,
               min_bbox_score=0.0,
-              color_jitter_strength=0.,
-              jitter_scale_min=0.3,
-              jitter_scale_max=1.0,
+              train_transforms=transform_configs.get_keypoint_detection_train_transforms(
+                  image_size, 1),
+              eval_transforms=transform_configs.get_keypoint_detection_eval_transforms(
+                  image_size, 1),
               top_k=0,
               top_p=0.1,
               temperature=1.0,
@@ -134,22 +137,23 @@ def get_config(config_str=None):
               eval_suppress_invisible_token=True,
               metric=D(name='coco_keypoint_detection',)),
       'captioning':
-          D(name='captioning',
-            vocab_id=13,
-            image_size=image_size,
-            max_seq_len=128,
-            captions_per_image=5,
-            max_instances_per_image=5,
-            color_jitter_strength=0.5,
-            jitter_scale_min=1.0,
-            jitter_scale_max=1.0,
-            eos_token_weight=0.1,
-            input_seq_drop_rate=0.5,
-            top_k=0,
-            top_p=1.0,
-            temperature=1.0,
-            weight=1.,
-            metric=D(name='coco_captioning',)),
+          D(
+              name='captioning',
+              vocab_id=13,
+              image_size=image_size,
+              max_seq_len=128,
+              captions_per_image=5,
+              train_transforms=transform_configs.get_captioning_train_transforms(
+                  image_size),
+              eval_transforms=transform_configs.get_captioning_eval_transforms(
+                  image_size),
+              eos_token_weight=0.1,
+              input_seq_drop_rate=0.5,
+              top_k=0,
+              top_p=1.0,
+              temperature=1.0,
+              weight=1.,
+              metric=D(name='coco_captioning',)),
       'panoptic_segmentation':
           D(
               name='panoptic_segmentation',

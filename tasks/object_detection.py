@@ -24,7 +24,6 @@ import ml_collections
 import numpy as np
 import utils
 import vocab
-from data import data_utils
 from metrics import metric_registry
 from metrics import metric_utils
 from tasks import task as task_lib
@@ -70,45 +69,12 @@ class TaskObjectDetection(task_lib.Task):
     Returns:
       A dataset.
     """
-
-    def _preprocess_single_example(features, labels):
-      config = self.config.task
-      features['orig_image_size'] = tf.shape(features['image'])[:2]
-
-      if training:
-        features_list, labels_list = [], []
-        for _ in range(batch_duplicates):
-          features_, labels_ = data_utils.preprocess_train(
-              features,
-              labels,
-              max_image_size=config.image_size,
-              max_instances_per_image=config.max_instances_per_image,
-              object_order=config.object_order,
-              inject_noise_instances=config.noise_bbox_weight > 0,
-              jitter_scale=(config.jitter_scale_min, config.jitter_scale_max),
-              random_flip=True,
-              color_jitter_strength=config.color_jitter_strength,
-              filter_invalid_labels=True,
-              object_coordinate_keys=('bbox', 'polygon', 'keypoints'))
-          features_list.append(features_)
-          labels_list.append(labels_)
-        features = utils.merge_list_of_dict(features_list)
-        labels = utils.merge_list_of_dict(labels_list)
-      else:
-        features, labels = data_utils.preprocess_eval(
-            features,
-            labels,
-            max_image_size=config.image_size,
-            max_instances_per_image=config.max_instances_per_image,
-            object_coordinate_keys=('bbox', 'polygon', 'keypoints'))
-
-      return features, labels
-
     if training:
       dataset = dataset.filter(  # Filter out images with no annotations.
-          lambda features, labels: tf.shape(labels['label'])[0] > 0)
-    dataset = dataset.map(_preprocess_single_example,
-                          num_parallel_calls=tf.data.experimental.AUTOTUNE)
+          lambda example: tf.shape(example['label'])[0] > 0)
+    dataset = dataset.map(
+        lambda x: self.preprocess_single_example(x, training, batch_duplicates),
+        num_parallel_calls=tf.data.experimental.AUTOTUNE)
     return dataset
 
   def preprocess_batched(self, batched_examples, training):
@@ -131,12 +97,12 @@ class TaskObjectDetection(task_lib.Task):
     """
     config = self.config.task
     mconfig = self.config.model
-    features, labels = batched_examples
 
     # Create input/target seq.
     ret = build_response_seq_from_bbox(
-        labels['bbox'], labels['label'], config.quantization_bins,
-        config.noise_bbox_weight, mconfig.coord_vocab_shift,
+        batched_examples['bbox'], batched_examples['label'],
+        config.quantization_bins, config.noise_bbox_weight,
+        mconfig.coord_vocab_shift,
         class_label_corruption=config.class_label_corruption)
     response_seq, response_seq_cm, token_weights = ret
     prompt_seq = task_utils.build_prompt_seq_from_task_id(
@@ -157,9 +123,9 @@ class TaskObjectDetection(task_lib.Task):
         tf.zeros_like(token_weights) + config.eos_token_weight, token_weights)
 
     if training:
-      return features['image'], input_seq, target_seq, token_weights
+      return batched_examples['image'], input_seq, target_seq, token_weights
     else:
-      return features['image'], response_seq, batched_examples
+      return batched_examples['image'], response_seq, batched_examples
 
   def infer(self, model, preprocessed_outputs):
     """Perform inference given the model and preprocessed outputs."""
@@ -198,10 +164,10 @@ class TaskObjectDetection(task_lib.Task):
     """
     config = self.config.task
     mconfig = self.config.model
-    features, labels = batched_examples
-    images, image_ids = features['image'], features['image/id']
-    orig_image_size = features['orig_image_size']
-    unpadded_image_size = features['unpadded_image_size']
+    example = batched_examples
+    images, image_ids = example['image'], example['image/id']
+    orig_image_size = example['orig_image_size']
+    unpadded_image_size = example['unpadded_image_size']
 
     # Decode sequence output.
     pred_classes, pred_bboxes, scores = task_utils.decode_object_seq_to_bbox(
@@ -221,9 +187,9 @@ class TaskObjectDetection(task_lib.Task):
       scale = tf.expand_dims(scale, 1)
     pred_bboxes_rescaled = utils.scale_points(pred_bboxes, scale)
 
-    gt_classes, gt_bboxes = labels['label'], labels['bbox']
+    gt_classes, gt_bboxes = example['label'], example['bbox']
     gt_bboxes_rescaled = utils.scale_points(gt_bboxes, scale)
-    area, is_crowd = labels['area'], labels['is_crowd']
+    area, is_crowd = example['area'], example['is_crowd']
 
     return (images, image_ids, pred_bboxes, pred_bboxes_rescaled, pred_classes,
             scores, gt_classes, gt_bboxes, gt_bboxes_rescaled, area, is_crowd)

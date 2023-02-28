@@ -17,6 +17,7 @@
 
 import copy
 import functools
+from typing import Any, List, Optional, Sequence, Tuple
 
 from absl import logging
 import ml_collections
@@ -159,7 +160,7 @@ def unflatten_points(points):
   return tf.reshape(points, output_shape)
 
 
-def _flip_polygons_left_right(points):
+def flip_polygons_left_right(points):
   """Left-right flip the points in polygons.
 
   Args:
@@ -198,7 +199,7 @@ def _reverse_every(tensor, dim, n):
   return tf.reshape(tensor, tshape)
 
 
-def _flip_keypoints_left_right(points):
+def flip_keypoints_left_right(points):
   """Left-right flip the keypoints.
 
   Args:
@@ -219,7 +220,7 @@ def _flip_keypoints_left_right(points):
   return flatten_points(points)
 
 
-def _flip_boxes_left_right(boxes):
+def flip_boxes_left_right(boxes):
   """Left-right flip the boxes.
 
   Args:
@@ -243,11 +244,11 @@ def random_horizontal_flip(features, labels):
       features['image'] = tf.image.flip_left_right(features['image'])
     # TODO(b/188693498): The order of terms in the if condition matters.
     if 'bbox' in labels and coin_flip:
-      labels['bbox'] = _flip_boxes_left_right(labels['bbox'])
+      labels['bbox'] = flip_boxes_left_right(labels['bbox'])
     if 'keypoints' in labels and coin_flip:
-      labels['keypoints'] = _flip_keypoints_left_right(labels['keypoints'])
+      labels['keypoints'] = flip_keypoints_left_right(labels['keypoints'])
     if 'polygon' in labels and coin_flip:
-      labels['polygon'] = _flip_polygons_left_right(labels['polygon'])
+      labels['polygon'] = flip_polygons_left_right(labels['polygon'])
   return features, labels
 
 
@@ -516,7 +517,7 @@ def fixed_size_crop(features, labels, target_height, target_width,
             tf.minimum(output_size[0], input_size[0] - offset[0]),
             tf.minimum(output_size[1], input_size[1] - offset[1]))
 
-  return crop(features, labels, region, object_coordinate_keys)
+  return crop_deprecated(features, labels, region, object_coordinate_keys)
 
 
 def random_crop(features, labels, scale, ratio, object_coordinate_keys):
@@ -553,7 +554,7 @@ def random_crop(features, labels, scale, ratio, object_coordinate_keys):
 
   region = (h_offset, w_offset, h, w)
 
-  return crop(features, labels, region, object_coordinate_keys)
+  return crop_deprecated(features, labels, region, object_coordinate_keys)
 
 
 def handle_out_of_frame_points(points, key):
@@ -566,8 +567,8 @@ def handle_out_of_frame_points(points, key):
                     points)
 
 
-def crop(features, labels, region,
-         object_coordinate_keys=('bbox', 'polygon', 'keypoints')):
+def crop_deprecated(features, labels, region,
+                    object_coordinate_keys=('bbox', 'polygon', 'keypoints')):
   """Crop image to region and adjust (normalized) bbox."""
   image = features['image']
   h_offset, w_offset, h, w = region
@@ -601,6 +602,45 @@ def crop(features, labels, region,
     features['crop_offset'] = [new_h_offset, new_w_offset]
 
   return features, labels
+
+
+def crop(example: dict[str, tf.Tensor],
+         region: Tuple[Any, Any, Any, Any],
+         input_keys: List[str],
+         object_coordinate_keys: Optional[List[str]]):
+  """Crop image to region and adjust (normalized) bbox."""
+  h_offset, w_offset, h, w = region
+  h_ori, w_ori, _ = tf.unstack(tf.shape(example[input_keys[0]]))
+  for k in input_keys:
+    example[k] = example[k][h_offset:h_offset + h, w_offset:w_offset + w, :]
+
+  # Record the crop offset.
+  if 'crop_offset' not in example:
+    # Cropping the first time.
+    example['crop_offset'] = tf.cast(region[:2], tf.int32)
+  else:
+    # Subsequent crops e.g. when crop_to_bbox is True and we apply random_crop.
+    old_h_offset, old_w_offset = tf.unstack(example['crop_offset'])
+    example['crop_offset'] = tf.cast(
+        [old_h_offset + h_offset, old_w_offset + w_offset], tf.int32)
+
+  # Crop object coordinates.
+  if object_coordinate_keys:
+    h_offset = tf.cast(h_offset, tf.float32)
+    w_offset = tf.cast(w_offset, tf.float32)
+    h, w = tf.cast(h, tf.float32), tf.cast(w, tf.float32)
+    h_ori, w_ori = tf.cast(h_ori, tf.float32), tf.cast(w_ori, tf.float32)
+
+    scale = tf.stack([h_ori / h, w_ori / w])
+    offset = tf.stack([h_offset / h_ori, w_offset / w_ori])
+    for key in object_coordinate_keys:
+      points = example[key]
+      points = unflatten_points(points)
+      points = (points - offset) * scale
+      points = handle_out_of_frame_points(points, key)
+      example[key] = flatten_points(points)
+
+  return example
 
 
 def pad_image_to_max_size(features,
@@ -721,7 +761,8 @@ def preprocess_eval(features,
 def maybe_unbatch_instances_and_crop_image_to_bbox(
     dataset: tf.data.Dataset,
     config: ml_collections.ConfigDict,
-    per_instance_points_keys=('polygon', 'keypoints')):
+    image_feature_keys: Sequence[str] = ('image', 'image/id'),
+    per_instance_points_keys: Sequence[str] = ('polygon', 'keypoints')):
   """Returns ds with a single instance per example with images cropped to bbox.
 
   'crop_offset' is added to features which can be used to recover the position
@@ -730,6 +771,10 @@ def maybe_unbatch_instances_and_crop_image_to_bbox(
   Args:
     dataset: A tf.data.Dataset.
     config: Config.
+    image_feature_keys: Names of image features that will be repeated for
+      every example after unbatching. All other features in the example will
+      be treated as instance-level features, i.e. will be unbatched into
+      one instance per example.
     per_instance_points_keys: Keys containing list of points for each instance.
 
   Returns:
@@ -740,29 +785,33 @@ def maybe_unbatch_instances_and_crop_image_to_bbox(
     config.task.max_instances_per_image is not 1.
   """
   tconfig = config.task
+
   if tconfig.unbatch:
     logging.info('Unbatching instances')
     assert tconfig.max_instances_per_image == 1
     @tf.autograph.experimental.do_not_convert
-    def tile_features(features, labels):
-      num_instances = tf.shape(labels['label'])[0]
+    def tile_features(example):
+      num_instances = tf.shape(example['label'])[0]
       # Tile features.
-      for key in features:
-        features[key] = tf.expand_dims(features[key], 0)
-        multiples = [1] * len(features[key].shape)
+      for key in image_feature_keys:
+        example[key] = tf.expand_dims(example[key], 0)
+        multiples = [1] * len(example[key].shape)
         multiples[0] = num_instances
-        features[key] = tf.tile(features[key], multiples)
-      return features, labels
+        example[key] = tf.tile(example[key], multiples)
+      return example
     @tf.autograph.experimental.do_not_convert
-    def insert_instance_dim(features, labels):
-      # Tile features.
-      for key in labels:
-        labels[key] = tf.expand_dims(labels[key], 0)
-      return features, labels
+    def insert_instance_dim(example):
+      instance_feature_keys = [
+          k for k in example if k not in image_feature_keys]
+      for key in instance_feature_keys:
+        example[key] = tf.expand_dims(example[key], 0)
+      return example
     @tf.autograph.experimental.do_not_convert
-    def crop_to_bbox(features, labels):
-      bbox = labels['bbox'][0]
-      image_shape = tf.shape(features['image'])[:2]
+    def crop_to_bbox(example):
+      instance_feature_keys = [
+          k for k in example if k not in image_feature_keys]
+      bbox = example['bbox'][0]
+      image_shape = tf.shape(example['image'])[:2]
 
       # Normalized bbox coords.
       ymin, xmin, ymax, xmax = [tf.squeeze(t) for t in tf.split(bbox, 4)]
@@ -791,28 +840,34 @@ def maybe_unbatch_instances_and_crop_image_to_bbox(
       xmin = tf.math.maximum(0, xmin - xpad)
       xmax = tf.math.minimum(image_shape[1] - 1, xmax + xpad)
 
-      region = [ymin, xmin, ymax - ymin + 1, xmax - xmin + 1]
+      region = (ymin, xmin, ymax - ymin + 1, xmax - xmin + 1)
       points_orig = {
-          key: labels[key] for key in per_instance_points_keys if key in labels
+          key: example[key] for key in per_instance_points_keys
+          if key in instance_feature_keys
       }
-      features, labels = crop(features, labels, region)
+      object_coordinate_keys = [k for k in ['bbox', 'polygon', 'keypoints']
+                                if k in instance_feature_keys]
+      example = crop(example, region, input_keys=['image'],
+                     object_coordinate_keys=object_coordinate_keys)
       for key in points_orig:
-        labels[key] = utils.preserve_reserved_tokens(
-            labels[key], points_orig[key])
-      return features, labels
+        example[key] = utils.preserve_reserved_tokens(
+            example[key], points_orig[key])
+      return example
 
     @tf.autograph.experimental.do_not_convert
-    def sort_instances_by_score(features, labels):
+    def sort_instances_by_score(example):
       logging.info('Sorting labels by scores in the input pipeline')
-      indices = tf.argsort(labels['scores'], direction='DESCENDING')
-      for key in labels:
-        labels[key] = tf.gather(labels[key], indices)
-      return features, labels
+      instance_feature_keys = [
+          k for k in example if k not in image_feature_keys]
+      indices = tf.argsort(example['scores'], direction='DESCENDING')
+      for key in instance_feature_keys:
+        example[key] = tf.gather(example[key], indices)
+      return example
 
     @tf.autograph.experimental.do_not_convert
-    def is_image_valid(features, unused_labels):
+    def is_image_valid(example):
       logging.info('Filtering invalid images in the input pipeline')
-      image_size = tf.unstack(tf.shape(features['image']))
+      image_size = tf.unstack(tf.shape(example['image']))
       return tf.logical_and(tf.greater(image_size[0], 0),
                             tf.greater(image_size[1], 0))
 

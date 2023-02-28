@@ -15,7 +15,6 @@
 # ==============================================================================
 """Keypoint detection task via COCO metric evaluation."""
 
-import copy
 import os
 import pickle
 
@@ -67,57 +66,12 @@ class TaskKeypointDetection(task_lib.Task):
     dataset = data_utils.maybe_unbatch_instances_and_crop_image_to_bbox(
         dataset, self.config)
 
-    def _preprocess_single_example(features, labels):
-      config = self.config.task
-      features['orig_image_size'] = tf.shape(features['image'])[:2]
-
-      # Sample a fix-sized random subset of object instances in labels.
-      num_instances = tf.shape(labels['label'])[0]
-      if tf.greater(num_instances, config.max_instances_per_image):
-        features, labels = copy.copy(features), copy.copy(labels)
-        indices = tf.random.shuffle(tf.range(num_instances, dtype=tf.int32))
-        indices = indices[:config.max_instances_per_image]
-        for key in labels:
-          labels[key] = tf.gather(labels[key], indices)
-      labels = data_utils.truncate_or_pad_to_max_instances(
-          labels, config.max_instances_per_image)
-
-      points_orig = labels['keypoints']
-      if training:
-        features_list, labels_list = [], []
-        for _ in range(batch_duplicates):
-          features_, labels_ = data_utils.preprocess_train(
-              features,
-              labels,
-              max_image_size=config.image_size,
-              max_instances_per_image=config.max_instances_per_image,
-              object_order=None,  # No reordering per `preserve_reserved_tokens`
-              jitter_scale=(config.jitter_scale_min, config.jitter_scale_max),
-              random_flip=False,  # TODO(iamtingchen): re-enable after bug fix.
-              color_jitter_strength=config.color_jitter_strength,
-              filter_invalid_labels=True,
-              object_coordinate_keys=('bbox', 'polygon', 'keypoints'))
-          features_list.append(features_)
-          labels_list.append(labels_)
-        features = utils.merge_list_of_dict(features_list)
-        labels = utils.merge_list_of_dict(labels_list)
-      else:
-        features, labels = data_utils.preprocess_eval(
-            features,
-            labels,
-            max_image_size=config.image_size,
-            max_instances_per_image=config.max_instances_per_image,
-            object_coordinate_keys=('bbox', 'polygon', 'keypoints'))
-      labels['keypoints'] = utils.preserve_reserved_tokens(
-          labels['keypoints'], points_orig)
-
-      return features, labels
-
     if training:
       dataset = dataset.filter(  # Filter out images with no annotations.
-          lambda features, labels: tf.shape(labels['label'])[0] > 0)
-    dataset = dataset.map(_preprocess_single_example,
-                          num_parallel_calls=tf.data.experimental.AUTOTUNE)
+          lambda example: tf.shape(example['label'])[0] > 0)
+    dataset = dataset.map(
+        lambda x: self.preprocess_single_example(x, training, batch_duplicates),
+        num_parallel_calls=tf.data.experimental.AUTOTUNE)
     return dataset
 
   def preprocess_batched(self, batched_examples, training):
@@ -136,14 +90,13 @@ class TaskKeypointDetection(task_lib.Task):
     """
     config = self.config.task
     mconfig = self.config.model
-    features, labels = batched_examples
     prompt_seq = task_utils.build_instance_prompt_seq(
-        self.task_vocab_id, labels['bbox'], labels['label'],
+        self.task_vocab_id, batched_examples['bbox'], batched_examples['label'],
         config.quantization_bins, mconfig.coord_vocab_shift)
-    original_points = labels['keypoints']
+    original_points = batched_examples['keypoints']
     assert original_points.dtype == tf.float32
     response_seq = task_utils.build_instance_response_seq_from_points(
-        original_points, labels['label'],
+        original_points, batched_examples['label'],
         config.quantization_bins, mconfig.coord_vocab_shift)
     label_seq = tf.concat([prompt_seq, response_seq], -1)
 
@@ -171,7 +124,7 @@ class TaskKeypointDetection(task_lib.Task):
         target_seq == vocab.INVISIBLE_TOKEN,
         tf.zeros_like(token_weights) + config.invisible_token_weight,
         token_weights)
-    pad_t = tf.expand_dims(tf.greater(labels['label'], 0), -1)
+    pad_t = tf.expand_dims(tf.greater(batched_examples['label'], 0), -1)
     token_weights = tf.where(pad_t, token_weights, tf.zeros_like(token_weights))
     token_weights = utils.pad_to_max_len(token_weights, config.max_seq_len, -1)
     token_weights = tf.where(
@@ -179,9 +132,9 @@ class TaskKeypointDetection(task_lib.Task):
         tf.zeros_like(token_weights) + config.eos_token_weight, token_weights)
 
     if training:
-      return features['image'], input_seq, target_seq, token_weights
+      return batched_examples['image'], input_seq, target_seq, token_weights
     else:
-      return features['image'], response_seq, batched_examples
+      return batched_examples['image'], response_seq, batched_examples
 
   def infer(self, model, preprocessed_outputs):
     """Perform inference given the model and preprocessed outputs."""
@@ -190,9 +143,9 @@ class TaskKeypointDetection(task_lib.Task):
     image, _, examples = preprocessed_outputs  # response_seq unused by default
     if config.use_gt_box_at_test:  # Use gt bbox instead of predicted ones.
       encoded = None
-      pred_classes = examples[1]['label']
-      pred_bboxes = examples[1]['bbox']
-      scores = examples[1]['scores']
+      pred_classes = examples['label']
+      pred_bboxes = examples['bbox']
+      scores = examples['scores']
     else:
       bsz = tf.shape(image)[0]
       prompt_seq = task_utils.build_prompt_seq_from_task_id(
@@ -236,8 +189,8 @@ class TaskKeypointDetection(task_lib.Task):
         suppress_token = tf.logical_or(suppress_token, tf.equal(pred_seq, i))
       pred_seq = tf.where(suppress_token, pred_seq_no_suppressed, pred_seq)
     # if True:  # Sanity check by using gt response_seq as pred_seq.
-    #   pred_classes = examples[1]['label']
-    #   pred_bboxes = examples[1]['bbox']
+    #   pred_classes = examples['label']
+    #   pred_bboxes = examples['bbox']
     #   scores = tf.cast(tf.greater(pred_classes, 0), tf.float32)
     #   pred_seq = utils.flatten_batch_dims(preprocessed_outputs[1], 2)
     pred_classes = tf.reshape(pred_classes, [-1])  # (bsz * instances)
@@ -270,10 +223,9 @@ class TaskKeypointDetection(task_lib.Task):
     """
     config = self.config.task
     mconfig = self.config.model
-    features, _ = batched_examples  # labels not used.
-    images, image_ids = features['image'], features['image/id']
-    orig_image_size = features['orig_image_size']
-    unpadded_image_size = features['unpadded_image_size']
+    images, image_ids = batched_examples['image'], batched_examples['image/id']
+    orig_image_size = batched_examples['orig_image_size']
+    unpadded_image_size = batched_examples['unpadded_image_size']
 
     # Tile image related features to support multiple instances per image.
     bsz = tf.shape(images)[0]
@@ -316,9 +268,9 @@ class TaskKeypointDetection(task_lib.Task):
 
     # Scale the points to original image size.
     pred_points_rescaled = utils.scale_points(pred_points, scale)
-    if 'crop_offset' in features:
+    if 'crop_offset' in batched_examples:
       pred_points_rescaled = data_utils.adjust_for_crop_offset(
-          pred_points_rescaled, features, config.max_points_per_object)
+          pred_points_rescaled, batched_examples, config.max_points_per_object)
 
     if config.points_score_weight:
       scores = task_utils.compute_weighted_scores(scores, pred_seq, logits,

@@ -1,6 +1,7 @@
-# Pix2Seq - A general framework for turning RGB pixels into semantically meaningful sequences
+# Pix2Seq codebase: task-centric, multi-tasks with generative modeling
 
 This is the official implementation of Pix2Seq in Tensorflow 2 with efficient TPUs/GPUs support as well as interactive debugging similar to Pytorch.
+The original Pix2Seq code aims to be a general framework that turns RGB pixels into semantically meaningful sequences. We later extend it to be a generic codebase, with task-centric organization that supports different tasks as well as their combination, using generative modeling (both autoregressive and diffusion models, see below).
 
 <div align="center">
   <img width="95%" alt="Pix2Seq Illustration" src="pix2seq.gif">
@@ -8,6 +9,12 @@ This is the official implementation of Pix2Seq in Tensorflow 2 with efficient TP
 <div align="center">
   An illustration of Pix2Seq for object detection (from <a href="https://ai.googleblog.com/2022/04/pix2seq-new-language-interface-for.html">our Google AI blog post</a>).
 </div>
+
+## (<span style="color:red">NEW!</span>) Diffusion models
+
+We added (official) implementations of diffusion models (such as Bit Diffusion, RIN, see references below) built on top of the original Pix2Seq codebase and they can be found in tasks/ and models/.
+
+Please note that we have not yet added proper documentations on training these models.
 
 ## Models
 <a href="https://colab.research.google.com/github/google-research/pix2seq/blob/master/colabs/pix2seq_inference_object_detection.ipynb" target="_parent"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>
@@ -175,6 +182,50 @@ Note: You can run eval on a subset of images by setting `--config.eval.steps`.
   author={Chen, Ting and Saxena, Saurabh and Li, Lala and Lin, Tsung-Yi and Fleet, David J. and Hinton, Geoffrey},
   journal={arXiv preprint arXiv:2206.07669},
   year={2022}
+}
+```
+
+[Pix2seq-D paper](https://arxiv.org/abs/2210.06366):
+
+```
+@article{chen2022unified,
+  title={A generalist framework for panoptic segmentation of images and videos},
+  author={Chen, Ting and Li, Lala and Saxena, Saurabh and Hinton, Geoffrey and Fleet, David J.},
+  journal={arXiv preprint arXiv:2210.06366},
+  year={2022}
+}
+```
+
+[Bit Diffusion paper](https://arxiv.org/abs/2208.04202):
+
+```
+@article{chen2022analog,
+  title={Analog bits: Generating discrete data using diffusion models with self-conditioning},
+  author={Chen, Ting and Zhang, Ruixiang and Hinton, Geoffrey},
+  journal={arXiv preprint arXiv:2208.04202},
+  year={2022}
+}
+```
+
+[RIN Diffusion paper](https://arxiv.org/abs/2212.11972):
+
+```
+@article{jabri2022scalable,
+  title={Scalable Adaptive Computation for Iterative Generation},
+  author={Jabri, Allan and Fleet, David J. and Chen, Ting},
+  journal={arXiv preprint arXiv:2212.11972},
+  year={2022}
+}
+```
+
+[Diffusion noise scheduling paper](https://arxiv.org/abs/2301.10972):
+
+```
+@article{chen2023on,
+  title={On the Importance of Noise Scheduling for Diffusion Models},
+  author={Chen, Ting},
+  journal={arXiv preprint arXiv:2301.10972},
+  year={2023}
 }
 ```
 

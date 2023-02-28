@@ -18,6 +18,7 @@
 import copy
 
 from configs import dataset_configs
+from configs import transform_configs
 from configs.config_base import architecture_config_map
 from configs.config_base import D
 
@@ -31,13 +32,13 @@ def get_config(config_str=None):
   encoder_variant = 'vit-b'                 # Set model architecture.
   image_size = (640, 640)                   # Set image size.
 
+
   tasks_and_datasets = []
   for task_and_ds in task_variant.split('+'):
     tasks_and_datasets.append(task_and_ds.split('@'))
 
-
-  # Download from gs://pix2seq/multi_task/data/coco/json
-  coco_annotations_dir = '/tmp/coco_annotations'
+  max_instances_per_image = 100
+  max_instances_per_image_test = 100
 
   task_config_map = {
       'object_detection': D(
@@ -45,12 +46,12 @@ def get_config(config_str=None):
           vocab_id=10,
           image_size=image_size,
           quantization_bins=1000,
-          max_instances_per_image=100,
-          max_instances_per_image_test=100,
-          object_order='random',
-          color_jitter_strength=0.,
-          jitter_scale_min=0.3,
-          jitter_scale_max=2.0,
+          max_instances_per_image=max_instances_per_image,
+          max_instances_per_image_test=max_instances_per_image_test,
+          train_transforms=transform_configs.get_object_detection_train_transforms(
+              image_size, max_instances_per_image),
+          eval_transforms=transform_configs.get_object_detection_eval_transforms(
+              image_size, max_instances_per_image_test),
           # Train on both ground-truth and (augmented) noisy objects.
           noise_bbox_weight=1.0,
           eos_token_weight=0.1,
@@ -62,6 +63,7 @@ def get_config(config_str=None):
           top_p=0.4,
           temperature=1.0,
           weight=1.0,
+          metric=D(name='coco_object_detection',),
       ),
   }
 

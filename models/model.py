@@ -46,12 +46,14 @@ class Trainer(abc.ABC):
     train_steps = kwargs['train_steps']
     c_opt = config.optimization
     batch_size = config.train.batch_size
-    end_lr_factor = c_opt.end_lr_factor if 'end_lr_factor' in c_opt else 0.
+    tail_steps = c_opt.get('tail_steps', 0)
+    end_lr_factor = c_opt.get('end_lr_factor', 0.)
     warmup_steps = c_opt.warmup_steps or int(
         round(c_opt.warmup_epochs * num_train_examples // batch_size))
     self._learning_rate = learning_rate = model_utils.WarmUpAndDecay(
         c_opt.learning_rate, c_opt.learning_rate_scaling, batch_size,
-        c_opt.learning_rate_schedule, warmup_steps, train_steps, end_lr_factor)
+        c_opt.learning_rate_schedule, warmup_steps, train_steps,
+        tail_steps=tail_steps, end_lr_factor=end_lr_factor)
     self._optimizer = optimizer = model_utils.build_optimizer(
         config.optimization, learning_rate)
 

@@ -77,23 +77,22 @@ class CocoObjectDetectionTFRecordDataset(dataset_lib.TFRecordDataset):
     Returns:
       example: `dict` of relevant features and labels.
     """
-    features = {
+    new_example = {
         'image': decode_utils.decode_image(example),
         'image/id': tf.strings.to_number(example['image/source_id'], tf.int64),
     }
 
     bbox = decode_utils.decode_boxes(example)
-    scale = 1. / utils.tf_float32(tf.shape(features['image'])[:2])
+    scale = 1. / utils.tf_float32(tf.shape(new_example['image'])[:2])
     bbox = utils.scale_points(bbox, scale)
 
-    labels = {
+    new_example.update({
         'label': example['image/object/class/label'],
         'bbox': bbox,
         'area': decode_utils.decode_areas(example),
         'is_crowd': decode_utils.decode_is_crowd(example),
-    }
-
-    return features, labels
+    })
+    return new_example
 
 
 @dataset_lib.DatasetRegistry.register('coco/2017_instance_segmentation')
@@ -129,7 +128,7 @@ class CocoInstanceSegmentationTFRecordDataset(dataset_lib.TFRecordDataset):
       example: `dict` of relevant features and labels.
     """
     assert not self.task_config.shuffle_polygon_start_point
-    features = {
+    new_example = {
         'image': decode_utils.decode_image(example),
         'image/id': tf.strings.to_number(example['image/source_id'], tf.int64),
     }
@@ -155,17 +154,17 @@ class CocoInstanceSegmentationTFRecordDataset(dataset_lib.TFRecordDataset):
     polygons = tf.boolean_mask(polygons, is_valid)
     scores = tf.boolean_mask(scores, is_valid)
 
-    scale = 1. / utils.tf_float32(tf.shape(features['image'])[:2])
-    labels = {
+    scale = 1. / utils.tf_float32(tf.shape(new_example['image'])[:2])
+
+    new_example.update({
         'label': labels,
         'bbox': utils.scale_points(bbox, scale),
         'area': areas,
         'is_crowd': iscrowd,
         'polygon': utils.scale_points(polygons, scale),
         'scores': scores
-    }
-
-    return features, labels
+    })
+    return new_example
 
 
 @dataset_lib.DatasetRegistry.register('coco/2017_keypoint_detection')
@@ -213,7 +212,7 @@ class CocoKeypointDetectionTFRecordDataset(dataset_lib.TFRecordDataset):
     Returns:
       example: `dict` of relevant features and labels.
     """
-    features = {
+    new_example = {
         'image': decode_utils.decode_image(example),
         'image/id': tf.strings.to_number(example['image/source_id'], tf.int64),
     }
@@ -250,8 +249,8 @@ class CocoKeypointDetectionTFRecordDataset(dataset_lib.TFRecordDataset):
     num_keypoints = tf.boolean_mask(num_keypoints, is_valid)
     scores = tf.boolean_mask(scores, is_valid)
 
-    scale = 1. / utils.tf_float32(tf.shape(features['image'])[:2])
-    labels = {
+    scale = 1. / utils.tf_float32(tf.shape(new_example['image'])[:2])
+    new_example.update({
         'label': labels,
         'bbox': utils.scale_points(bbox, scale),
         'area': areas,
@@ -259,9 +258,8 @@ class CocoKeypointDetectionTFRecordDataset(dataset_lib.TFRecordDataset):
         'keypoints': utils.scale_points(keypoints, scale),
         'num_keypoints': num_keypoints,
         'scores': scores
-    }
-
-    return features, labels
+    })
+    return new_example
 
 
 @dataset_lib.DatasetRegistry.register('coco/2017_captioning')
@@ -296,14 +294,9 @@ class CocoCaptioningTFRecordDataset(dataset_lib.TFRecordDataset):
     Returns:
       example: `dict` of relevant features and labels.
     """
-    features = {
+    return {
         'image': decode_utils.decode_image(example),
         'image/id': tf.strings.to_number(example['image/source_id'], tf.int64),
-    }
-
-    labels = {
         'captions':
             example['image/caption'][:self.task_config.captions_per_image],
     }
-
-    return features, labels

@@ -126,7 +126,7 @@ class Dataset(abc.ABC):
     return tf.distribute.get_strategy().distribute_datasets_from_function(
         input_fn)
 
-  def _flatten_dims(self, features, labels):
+  def _flatten_dims(self, example):
     """Flatten first 2 dims when batch is independently duplicated."""
 
     def flatten_first_2_dims(t):
@@ -136,9 +136,7 @@ class Dataset(abc.ABC):
       out_shape = [new_bsz] + shape_list[2:]
       return tf.reshape(t, out_shape)
 
-    features = {k: flatten_first_2_dims(v) for k, v in features.items()}
-    labels = {k: flatten_first_2_dims(v) for k, v in labels.items()}
-    return features, labels
+    return tf.nest.map_structure(flatten_first_2_dims, example)
 
   @property
   @abc.abstractmethod
