@@ -12,7 +12,7 @@ The original Pix2Seq code aims to be a general framework that turns RGB pixels i
 
 ## (<span style="color:red">NEW!</span>) Diffusion models
 
-We added (official) implementations of diffusion models (such as Bit Diffusion, RIN, see references below) built on top of the original Pix2Seq codebase and they can be found in tasks/ and models/.
+We added (official) implementations of diffusion models (such as Bit Diffusion, RIN, see references below) built on top of the original Pix2Seq codebase and they can be found in tasks/, models/, and architectures/.
 
 Please note that we have not yet added proper documentations on training these models.
 
