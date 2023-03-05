@@ -1,7 +1,7 @@
-# Pix2Seq codebase: task-centric, multi-tasks with generative modeling
+# Pix2Seq codebase: multi-tasks with generative modeling
 
-This is the official implementation of Pix2Seq in Tensorflow 2 with efficient TPUs/GPUs support as well as interactive debugging similar to Pytorch.
-The original Pix2Seq code aims to be a general framework that turns RGB pixels into semantically meaningful sequences. We later extend it to be a generic codebase, with task-centric organization that supports different tasks as well as their combination, using generative modeling (both autoregressive and diffusion models, see below).
+This is the official implementation of Pix2Seq in Tensorflow 2 with efficient TPUs/GPUs support.
+**The original Pix2Seq code aims to be a general framework that turns RGB pixels into semantically meaningful sequences**. We now extend it to be a generic codebase, with task-centric organization that supports different tasks as well as their combination, using generative modeling (**both autoregressive and diffusion models**, see below).
 
 <div align="center">
   <img width="95%" alt="Pix2Seq Illustration" src="pix2seq.gif">
