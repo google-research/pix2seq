@@ -204,17 +204,23 @@ class Model(tf.keras.models.Model):
     cond_denoise = self.get_cond_denoise(labels)
     denoise_out = cond_denoise(denoise_inputs, gamma, training)
     if isinstance(denoise_out, tuple): denoise_out = denoise_out[0]
-    return images, noise, images_noised, denoise_out
+    x0_clip_fn = diffusion_utils.get_x0_clipping_function(self.x0_clip)
+    pred_dict = diffusion_utils.get_x0_eps(
+        images_noised, gamma, denoise_out, config.pred_type, x0_clip_fn,
+        truncate_noise=False)
+    return images, noise, images_noised, pred_dict
 
   def compute_loss(self,
                    images: tf.Tensor,
                    noise: tf.Tensor,
-                   denoise_out: tf.Tensor) -> tf.Tensor:
+                   pred_dict: dict[str, tf.Tensor]) -> tf.Tensor:
     config = self.config
-    if config.pred_type == 'x':
-      loss = tf.reduce_mean(tf.square(images - denoise_out))
-    elif config.pred_type == 'eps':
-      loss = tf.reduce_mean(tf.square(noise - denoise_out))
+    loss_type = config.get('loss_type', config.pred_type)
+    if loss_type == 'x':
+      loss = tf.reduce_mean(
+          tf.square((images - pred_dict['data_pred']) / config.b_scale))
+    elif loss_type == 'eps':
+      loss = tf.reduce_mean(tf.square(noise - pred_dict['noise_pred']))
     else:
       raise ValueError(f'Unknown pred_type {config.pred_type}')
     return loss
@@ -226,9 +232,9 @@ class Model(tf.keras.models.Model):
            **kwargs)  -> tf.Tensor:  # pylint: disable=signature-mismatch
     """Model inference call."""
     with tf.name_scope(''):  # for other functions to have the same name scope
-      images, noise, _, denoise_out = self.noise_denoise(
+      images, noise, _, pred_dict = self.noise_denoise(
           images, labels, None, training)
-      return self.compute_loss(images, noise, denoise_out)
+      return self.compute_loss(images, noise, pred_dict)
 
 
 @model_lib.TrainerRegistry.register('image_diffusion_model')

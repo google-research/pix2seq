@@ -254,6 +254,26 @@ def get_local_ar_mask(seq_len, window_size, dtype=tf.float32):
   return 1.0 - valid_locs
 
 
+def get_chunk_ar_mask(seq_len, chunk_size, dtype=tf.float32):
+  """Get causal mask across chuncks, but full attention within each chunk.
+
+  Args:
+    seq_len: a `int` or `int` tensor specifying the sequence length.
+    chunk_size: a `int` or `int` tensor specifying the local window size.
+      seq_len must be divisible by chunk_size.
+    dtype: tf data type for the return tensor.
+
+  Returns:
+    tensor of shape [1, 1, seq_len, seq_len] with ones for
+    locations to be masked out.
+  """
+  valid_locs = tf.ones([chunk_size, chunk_size], dtype=dtype)
+  valid_locs = kronecker_product(tf.eye(seq_len // chunk_size), valid_locs)
+  valid_locs = tf.reshape(valid_locs, [1, 1, seq_len, seq_len])
+
+  return get_ar_mask(seq_len) * (1.0 - valid_locs)
+
+
 def merge_masks(mask1, mask2):
   """Merge ar and local ar masks, each of shape (1, 1, src, dst)."""
   sh1 = tf.shape(mask1)
