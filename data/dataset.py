@@ -25,6 +25,7 @@ import registry
 import tensorflow as tf
 import tensorflow_datasets as tfds
 
+
 DatasetRegistry = registry.Registry()
 
 
@@ -199,6 +200,11 @@ class TFDSDataset(Dataset):
 class TFRecordDataset(Dataset):
   """A dataset created from tfrecord files."""
 
+  def __init__(self, config: ml_collections.ConfigDict):
+    """Constructs the dataset."""
+    super().__init__(config)
+    self.dataset_cls = tf.data.TFRecordDataset
+
   def load_dataset(self, input_context, training):
     """Load tf.data.Dataset from TFRecord files."""
     if training or self.config.eval_split == 'train':
@@ -207,7 +213,8 @@ class TFRecordDataset(Dataset):
       file_pattern = self.config.val_file_pattern
     dataset = tf.data.Dataset.list_files(file_pattern, shuffle=training)
     dataset = dataset.interleave(
-        tf.data.TFRecordDataset, cycle_length=32, deterministic=not training)
+        self.dataset_cls, cycle_length=32, deterministic=not training,
+        num_parallel_calls=tf.data.experimental.AUTOTUNE)
     return dataset
 
   @abc.abstractmethod
@@ -254,3 +261,5 @@ class TFRecordDataset(Dataset):
   def num_eval_examples(self):
     return self.config.eval_num_examples if not self.task_config.get(
         'unbatch', False) else None
+
+
