@@ -31,7 +31,7 @@ class Obj365Dataset(dataset_lib.TFRecordDataset):
     Args:
       config: the model config.
     """
-    super(dataset_lib.TFRecordDataset, self).__init__(config)
+    super().__init__(config)
 
     if 'label_shift' in config.dataset:
       self.label_shift = config.dataset.label_shift
@@ -84,19 +84,16 @@ class Obj365Dataset(dataset_lib.TFRecordDataset):
     Returns:
       example: `dict` of relevant features and labels.
     """
-    features = {
+    bbox = decode_utils.decode_boxes(example)
+    example = {
         'image': decode_utils.decode_image(example),
         'image/id': self._get_source_id(example),
-    }
-    bbox = decode_utils.decode_boxes(example)
-    labels = {
-        'bbox_orig': bbox,
         'bbox': bbox,
         'is_crowd': decode_utils.decode_is_crowd(example),
         'label': example['image/object/class/label'] + self.label_shift,
         'area': decode_utils.decode_areas(example),
     }
-    return features, labels
+    return example
 
   @property
   def num_train_examples(self):
@@ -118,8 +115,9 @@ class Obj365Dataset(dataset_lib.TFRecordDataset):
   def num_classes(self):
     return 365
 
-  def get_feature_map(self):
+  def get_feature_map(self, training):
     """Returns feature map for parsing the TFExample."""
+    del training
     image_feature_map = decode_utils.get_feature_map_for_image()
     detection_feature_map = decode_utils.get_feature_map_for_object_detection()
     feature_map = {**image_feature_map, **detection_feature_map}

@@ -111,7 +111,7 @@ class TaskObjectRecognition(task_lib.Task):
       images_recon = image
     return examples, logits, images_recon
 
-  def postprocess_tpu(self, examples, logits, images_recon,
+  def postprocess_tpu(self, examples, logits, images_recon,  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
                       training=False):
     """Organizing results after fitting the batched examples in graph.
 
@@ -142,7 +142,7 @@ class TaskObjectRecognition(task_lib.Task):
       self._metrics['accuracy'].update_state(labels, logits)
     return (images, images_recon)
 
-  def postprocess_cpu(self, outputs, train_step,
+  def postprocess_cpu(self, outputs, train_step,  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
                       eval_step=None, training=False, summary_tag='eval',
                       ret_results=False):
     """CPU post-processing of outputs.

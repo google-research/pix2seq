@@ -29,6 +29,28 @@ import tensorflow_datasets as tfds
 DatasetRegistry = registry.Registry()
 
 
+def mix_datasets(input_fns, weights):
+  """Mix multiple datasets according to weights.
+
+  Args:
+    input_fns: a list of input_fn's. Each input_fn takes in an input_context and
+        produces a tf.data.Dataset instance.
+    weights: a list of floats where weights[i] represents the probability to
+        sample from input_fns[i].
+
+  Returns:
+    a tf.data.Dataset instance.
+  """
+  def input_fn(input_context):
+    dses = []
+    for ifn in input_fns:
+      dses.append(ifn(input_context))
+    mixed_ds = tf.data.Dataset.sample_from_datasets(dses, weights)
+    return mixed_ds
+  return tf.distribute.get_strategy().distribute_datasets_from_function(
+      input_fn)
+
+
 class Dataset(abc.ABC):
   """A dataset that handles creating a tf.data.Dataset."""
 
@@ -56,7 +78,8 @@ class Dataset(abc.ABC):
   def load_dataset(self, input_context, training):
     """Load tf.data.Dataset from sources such as TFDS or TFRecord files."""
 
-  def parse_example(self, example):
+  def parse_example(self, example, training):
+    del training
     return example
 
   def filter_example(self, unused_example, unused_training):
@@ -75,7 +98,7 @@ class Dataset(abc.ABC):
       training: training vs eval mode.
 
     Returns:
-      tf.data.Dataset instance.
+      An input_fn which generates a tf.data.Dataset instance.
     """
     config = self.config
     def input_fn(input_context):
@@ -103,7 +126,7 @@ class Dataset(abc.ABC):
         dataset = dataset.repeat()
 
       dataset = dataset.map(
-          self.parse_example,
+          lambda x: self.parse_example(x, training),
           num_parallel_calls=tf.data.experimental.AUTOTUNE
       ).filter(
           lambda x: self.filter_example(x, training)
@@ -124,8 +147,7 @@ class Dataset(abc.ABC):
       dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
       return dataset
 
-    return tf.distribute.get_strategy().distribute_datasets_from_function(
-        input_fn)
+    return input_fn
 
   def _flatten_dims(self, example):
     """Flatten first 2 dims when batch is independently duplicated."""
@@ -177,13 +199,13 @@ class TFDSDataset(Dataset):
     read_config = tfds.ReadConfig(input_context=input_context)
     if isinstance(split, list):
       dataset = self.builder.as_dataset(
-          split=split[0], shuffle_files=True, read_config=read_config)
+          split=split[0], shuffle_files=training, read_config=read_config)
       for i in range(1, len(split)):
         dataset.concatenate(self.builder.as_dataset(
-            split=split[i], shuffle_files=True, read_config=read_config))
+            split=split[i], shuffle_files=training, read_config=read_config))
     else:
       dataset = self.builder.as_dataset(
-          split=split, shuffle_files=True, read_config=read_config)
+          split=split, shuffle_files=training, read_config=read_config)
     return dataset
 
   @property
@@ -218,25 +240,29 @@ class TFRecordDataset(Dataset):
     return dataset
 
   @abc.abstractmethod
-  def get_feature_map(self):
+  def get_feature_map(self, training):
     """Returns feature map(s) for parsing the TFExample.
 
     Returns a single feature map (a dict) to parse a TFEXample.
     Returns a tuple of (context feature map, sequence feature map) to parse a
     TFSequenceExample. Context features are non-sequence features, i.e.
     independent of time/frame. Sequence features have time/frame dimension.
+
+    Args:
+      training: `bool` of training vs eval mode.
     """
 
-  def parse_example(self, example):
+  def parse_example(self, example, training):
     """Parse the serialized example into a dictionary of tensors.
 
     Args:
       example: the serialized tf.train.Example or tf.train.SequenceExample.
+      training: `bool` of training vs eval mode.
 
     Returns:
       a dictionary of feature name to tensors.
     """
-    feature_map = self.get_feature_map()
+    feature_map = self.get_feature_map(training)
     if isinstance(feature_map, dict):
       example = tf.io.parse_single_example(example, feature_map)
     else:

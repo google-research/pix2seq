@@ -53,7 +53,7 @@ def get_sweep(h):
             h.sweep('config.model.self_cond', ['x']),
             h.sweep('config.model.self_cond_by_masking', [False]),
             h.sweep('config.model.self_cond_rate', [0.5]),
-            h.sweep('config.model.b_scale', [1.0]),
+            h.sweep('config.model.b_scale', [0.5]),
             h.sweep('config.model.udrop', [0.]),
             h.sweep('config.model.dim', [256]),
             h.sweep('config.model.n_res_blocks', ['3,3,3']),

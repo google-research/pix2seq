@@ -24,6 +24,7 @@ import math
 import operator
 import os
 import time
+import einops
 import matplotlib
 import matplotlib.cm
 import numpy as np
@@ -129,6 +130,118 @@ def patches2images(patches_list, patch_size):
       images = patches
     images_list.append(images)
   return images_list
+
+
+def extract_patches(images, patch_size, patch_ordering='default'):
+  """Extra patches from images and return a sequence of patch tokens."""
+  tokens = tf.image.extract_patches(
+      images,
+      sizes=[1, *patch_size, 1],
+      strides=[1, *patch_size, 1],
+      rates=[1, 1, 1, 1],
+      padding='VALID',
+  )
+  if patch_ordering == 'default':
+    tokens = einops.rearrange(tokens, 'b h w c -> b (h w) c')
+  elif patch_ordering == 'snake':
+    tokens_list = []
+    for i in range(tokens.shape[1]):
+      if i % 2 == 0:
+        tokens_list.append(tokens[:, i])
+      else:
+        tokens_list.append(tokens[:, i][:, ::-1])
+    tokens = tf.stack(tokens_list, axis=1)
+    tokens = einops.rearrange(tokens, 'b h w c -> b (h w) c')
+  else:
+    raise ValueError(f'Unknown patch_ordering {patch_ordering}')
+  return tokens
+
+
+def tokens2images(tokens, patch_size, image_height, image_width):
+  """Tokens from `extract_patches` put back into images."""
+  tokens = einops.rearrange(
+      tokens,
+      'b (h w) c -> b h w c',
+      h=image_height // patch_size[0],
+      w=image_width // patch_size[1],
+  )
+  return tf.nn.depth_to_space(tokens, patch_size[0])
+
+
+def split_image_into_sub_images(x, num_sub_images_y, num_sub_images_x):
+  """Split images into sub-images."""
+  sub_image_shape_x = x.shape[1] // num_sub_images_x
+  sub_image_shape_y = x.shape[2] // num_sub_images_y
+
+  sub_images = []
+  for i in range(num_sub_images_x):
+    for j in range(num_sub_images_y):
+      sub_image = x[
+          :,
+          i * sub_image_shape_x : (i + 1) * sub_image_shape_x,
+          j * sub_image_shape_y : (j + 1) * sub_image_shape_y,
+          :,
+      ]
+      sub_images.append(sub_image)
+  return sub_images
+
+
+def images2subimages2tokens(images, sub_image_size, patch_size):
+  """Split images into sub images, and returns them as patch tokens."""
+  _, h, w, _ = images.shape
+  sub_ratio_h, sub_ratio_w = h // sub_image_size[0], w // sub_image_size[1]
+  images_seq = split_image_into_sub_images(images, sub_ratio_h, sub_ratio_w)
+  tokens = [extract_patches(images_, patch_size) for images_ in images_seq]
+  tokens = tf.stack(tokens, 1)
+  return tokens  # (b, num_sub_images, num_patches, d)
+
+
+def images2glimpses2tokens(
+    images, sub_image_size, patch_size, mini_x=0, shuffle=False
+):
+  """Similar to images2subimages2tokens, with extra downsampling & shuffling."""
+  bsz = tf.shape(images)[0]
+  _, h, w, _ = images.shape
+  sub_ratio_h, sub_ratio_w = h // sub_image_size[0], w // sub_image_size[1]
+  images_sub = split_image_into_sub_images(images, sub_ratio_h, sub_ratio_w)
+  if mini_x > 0:
+    images_mini = tf.image.resize(images, [h // sub_ratio_h, w // sub_ratio_w])
+    images_seq = [images_mini] * mini_x + images_sub
+  else:
+    images_seq = images_sub
+  tokens = [extract_patches(images_, patch_size) for images_ in images_seq]
+  tokens = tf.stack(tokens, 1)
+  idx = tf.tile(
+      tf.expand_dims(tf.range(sub_ratio_h * sub_ratio_w + mini_x), 0), [bsz, 1]
+  )
+  idx = tf.vectorized_map(tf.random.shuffle, idx) if shuffle else idx
+  tokens = tf.gather(tokens, idx, axis=1, batch_dims=1)
+  idx_hot = tf.one_hot(idx, sub_ratio_h * sub_ratio_w + mini_x)
+  return tokens, tf.expand_dims(idx_hot, 2)  # (b, t, tokens, d), (b, t, 1, d)
+
+
+def combine_sub_images(sub_images, num_sub_images_y, num_sub_images_x):
+  combined_rows = []
+  for i in range(0, num_sub_images_x * num_sub_images_y, num_sub_images_y):
+    combined_rows.append(
+        tf.concat(sub_images[i : i + num_sub_images_y], axis=2)
+    )
+  combined_image = tf.concat(combined_rows, axis=1)
+  return combined_image
+
+
+def tokens2subimages2images(tokens, sub_image_size, patch_size, image_size):
+  """Tokens (b, t, n, d) from images2subimages2tokens put back to images."""
+  num_sub_images_y = image_size[0] // sub_image_size[0]
+  num_sub_images_x = image_size[1] // sub_image_size[1]
+  sub_images = [
+      tokens2images(
+          tokens[:, i, :, :], patch_size, sub_image_size[0], sub_image_size[1]
+      )
+      for i in range(tokens.shape[1])
+  ]
+  images = combine_sub_images(sub_images, num_sub_images_y, num_sub_images_x)
+  return images
 
 
 def reduce_non_leading_dims(x, reduce_op=tf.reduce_sum, keepdims=True):
@@ -314,7 +427,8 @@ def get_train_steps(dataset, train_steps, train_epochs, train_batch_size):
 def get_eval_steps(dataset, eval_steps, eval_batch_size):
   """Determine the number of eval steps."""
   num_eval_examples = dataset.num_eval_examples
-  if not eval_steps and num_eval_examples and num_eval_examples % eval_batch_size != 0:
+  if not eval_steps and num_eval_examples and (
+      num_eval_examples % eval_batch_size != 0):
     raise ValueError('Only divisible eval batch sizes are currently supported.')
   # TODO(b/181662974): Revert this and support non-even batch sizes.
   # return eval_steps or int(
@@ -415,12 +529,12 @@ def copy_dir(source_dir, destination_dir):
           os.path.join(source_dir, filename),
           os.path.join(destination_dir, filename)) for filename in filenames
   ]
-  runInParallel(copy_fns)
+  run_in_parallel(copy_fns)
   logging.info('Copying %d files took %.2f seconds', len(filenames),
                time.time() - start)
 
 
-def runInParallel(fns):
+def run_in_parallel(fns):
   with futures.ThreadPoolExecutor() as executor:
     tasks = [executor.submit(fn) for fn in fns]
     for task in tasks:

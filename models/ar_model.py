@@ -20,6 +20,7 @@ import ml_collections
 import utils
 from architectures.transformers import add_vis_pos_emb
 from architectures.transformers import AutoregressiveDecoder
+from architectures.transformers import FIT
 from architectures.transformers import MLP
 from architectures.transformers import ResNetTransformer
 from architectures.transformers import VisionTransformer
@@ -113,7 +114,7 @@ class Model(tf.keras.models.Model):
         assert config.dec_proj_mode == 'linear_p'
     return encoded
 
-  def call(self, images, seq, training=True):
+  def call(self, images, seq, training=True):  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
     """Model function call for *training*.
 
     Args:
@@ -221,3 +222,67 @@ class ARTrainer(model_lib.Trainer):
         tf.boolean_mask(logits, tf.greater(token_weights_notpad, 0)))
 
     return loss
+
+
+@model_lib.ModelRegistry.register('fit_encoder_ar_decoder')
+class ModelT(Model):
+  """Inputs images and returns activations."""
+
+  def __init__(self, config: ml_collections.ConfigDict, **kwargs):
+    super(Model, self).__init__(**kwargs)
+    config = config.model
+    self.config = config
+    self.drate = config.glimpse_div_rate
+    self.mini_x = config.glimpse_mini_x
+    num_groups = self.drate**2 + self.mini_x
+    x_per_group = (config.image_size[0]//self.drate//config.patch_size)**2
+    self.encoder = FIT(
+        layers=config.layers,
+        x_size=x_per_group * num_groups,
+        num_groups=num_groups,
+        latents_per_group=config.latents_per_group,
+        x_dim=config.dim_att,
+        latent_dim=config.dim_latent,
+        x_num_heads=config.num_heads,
+        latent_num_heads=config.num_heads,
+        mlp_ratio=config.dim_mlp//config.dim_att,
+        drop_path=config.drop_path,
+        drop_units=config.drop_units,
+        drop_att=config.drop_att,
+        x_pos_encoding=config.pos_encoding,
+        latent_pos_encoding=config.latent_pos_encoding,
+        mask=config.mask)
+
+    mlp_ratio_dec = config.dim_mlp_dec // config.dim_att_dec
+    self.decoder = AutoregressiveDecoder(
+        config.vocab_size, config.max_seq_len, config.num_decoder_layers,
+        config.dim_att_dec, mlp_ratio_dec, config.num_heads_dec,
+        config.drop_path, config.drop_units, config.drop_att,
+        config.pos_encoding_dec, config.shared_decoder_embedding,
+        config.decoder_output_bias, name='ar_decoder')
+
+  def _encode_images(self, images, training):
+    """Encode images into latents for decoder to condition on."""
+    config = self.config
+    sub_isize = [config.image_size[0] // self.drate,
+                 config.image_size[1] // self.drate]
+    patch_size = [config.patch_size, config.patch_size]
+    if config.shuffle_glimpses:
+      images, idx = utils.images2glimpses2tokens(
+          images, sub_isize, patch_size, mini_x=self.mini_x, shuffle=True)
+    else:
+      images, idx = utils.images2glimpses2tokens(
+          images, sub_isize, patch_size, mini_x=self.mini_x, shuffle=False)
+      idx = None
+    x_tokens, l_tokens = self.encoder(images, idx, training)
+    if self.encoder.layer_configs[-1][-1] > 0:
+      # using latent tokens only when the network ends with global layer(s).
+      encoded = l_tokens
+    else:
+      encoded = x_tokens
+    bsz, seqlen, slots, dim = utils.shape_as_list(encoded)
+    encoded = tf.reshape(encoded, [bsz, seqlen * slots, dim])
+    return encoded
+
+
+model_lib.TrainerRegistry.register('fit_encoder_ar_decoder')(ARTrainer)

@@ -10,6 +10,10 @@ This is the official implementation of Pix2Seq in Tensorflow 2 with efficient TP
   An illustration of Pix2Seq for object detection (from <a href="https://ai.googleblog.com/2022/04/pix2seq-new-language-interface-for.html">our Google AI blog post</a>).
 </div>
 
+## (<span style="color:red">NEW!</span>) FitTransformer (FIT)
+
+We added (official) implementations of FIT architecture (as an encoder, a diffusion decoder, or an autoregressive decoder) see architectures/transformers.py.
+
 ## (<span style="color:red">NEW!</span>) Diffusion models
 
 We added (official) implementations of diffusion models (such as Bit Diffusion, RIN, see references below) built on top of the original Pix2Seq codebase and they can be found in tasks/, models/, and architectures/.
@@ -225,6 +229,17 @@ Note: You can run eval on a subset of images by setting `--config.eval.steps`.
   title={On the Importance of Noise Scheduling for Diffusion Models},
   author={Chen, Ting},
   journal={arXiv preprint arXiv:2301.10972},
+  year={2023}
+}
+```
+
+[FitTransformer (FIT) paper](https://arxiv.org/abs/2305.xx):
+
+```
+@article{chen2023fit,
+  title={FIT: Far-reaching Interleaved Transformers},
+  author={Chen, Ting and Li, Lala},
+  journal={arXiv preprint arXiv:2305.xx},
   year={2023}
 }
 ```

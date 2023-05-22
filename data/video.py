@@ -139,7 +139,7 @@ class DavisDataset(dataset_lib.TFRecordDataset):
     self._video_name_to_id_map = {
         v: i for i, v in enumerate(self.VIDEO_NAMES)}
 
-  def get_feature_map(self):
+  def get_feature_map(self, unused_training):
     """Returns feature map for parsing the TFExample."""
     context_features = {
         'image/format':
@@ -209,8 +209,9 @@ class DavisDataset(dataset_lib.TFRecordDataset):
 class KittiStepDataset(dataset_lib.TFRecordDataset):
   """The KITTI-STEP dataset."""
 
-  def get_feature_map(self):
+  def get_feature_map(self, training):
     """Returns feature map for parsing the TFExample."""
+    del training
     context_features = {
         'image/filename':
             tf.io.FixedLenFeature([], tf.string),

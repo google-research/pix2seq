@@ -50,6 +50,10 @@ class TapeDenoiser(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
                time_on_latent=False,
                cond_on_latent_n=0,
                cond_tape_writable=False,
+               cond_dim=0,
+               cond_proj=True,
+               cond_decoupled_read=False,
+               xattn_enc_ln=False,
                **kwargs):
     super().__init__(**kwargs)
     self._num_layers = [int(i) for i in num_layers.split(',')]
@@ -63,21 +67,26 @@ class TapeDenoiser(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
     # TODO(iamtingchen): the slots are inaccurate when cond is not None.
     self._tape_slots = self._num_tokens
     self._tape_dim = tape_dim
+    self._cond_dim = cond_dim = cond_dim if cond_dim > 0 else tape_dim
     self._latent_pos_encoding = latent_pos_encoding
     self._tape_pos_encoding = tape_pos_encoding
     self._self_cond = self_cond
     self._cond_tape_writable = cond_tape_writable
+    self._cond_decoupled_read = cond_decoupled_read
     time_scaling = tf.constant(time_scaling, dtype=tf.float32)
     assert self_cond in ['none', 'latent', 'latent+tape', 'tape']
     self.stem_ln = tf.keras.layers.LayerNormalization(
         epsilon=1e-6, name='stem_ln')
     self.time_emb = ScalarEmbedding(
-        dim=(latent_dim if self._time_on_latent else tape_dim) // 4,
+        dim=(latent_dim if self._time_on_latent else cond_dim) // 4,
         scaling=time_scaling,
         expansion=4,
         name='time_emb')
-    self.cond_proj = tf.keras.layers.Dense(
-        latent_dim if self._cond_on_latent else tape_dim, name='cond_proj')
+    if cond_proj:
+      self.cond_proj = tf.keras.layers.Dense(
+          latent_dim if self._cond_on_latent else cond_dim, name='cond_proj')
+    else:
+      self.cond_proj = lambda x: x
 
     self.make_latent_pos(latent_slots, latent_dim, latent_pos_encoding,
                          time_scaling)
@@ -104,6 +113,7 @@ class TapeDenoiser(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
       self.tape_prev_ln = tf.keras.layers.LayerNormalization(
           epsilon=1e-6, gamma_initializer='zeros', name='tape_prev_ln')
     self.read_units = {}
+    self.read_cond_units = {}
     self.write_units = {}
     self.conv_units = {}
     self.latent_processing_units = {}
@@ -120,8 +130,23 @@ class TapeDenoiser(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
           self_attention=False,
           cross_attention=True,
           use_mlp=True,
-          use_enc_ln=False,
+          use_enc_ln=xattn_enc_ln,
           name=f'read_unit_{i}')
+      if cond_decoupled_read:
+        self.read_cond_units[str(i)] = TransformerDecoder(
+            num_layers=1,
+            dim=latent_dim,
+            mlp_ratio=latent_mlp_ratio,
+            num_heads=rw_num_heads,
+            drop_path=0.,
+            drop_units=0.,
+            drop_att=0.,
+            dim_x_att=min(cond_dim, latent_dim),
+            self_attention=False,
+            cross_attention=True,
+            use_mlp=True,
+            use_enc_ln=xattn_enc_ln,
+            name=f'read_cond_unit_{i}')
       if num_layers_per_readwrite == 0:
         self.write_units[str(i)] = lambda x, *args, **kwargs: (x, None)
         self.conv_units[str(i)] = lambda x, *args, **kwargs: x
@@ -139,7 +164,7 @@ class TapeDenoiser(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
             self_attention=False,
             cross_attention=True,
             use_mlp=True if tape_mlp_ratio > 0 else False,
-            use_enc_ln=False,
+            use_enc_ln=xattn_enc_ln,
             name=f'write_unit_{i}')
         if conv_kernel_size == 0:
           self.conv_units[str(i)] = lambda x, *args, **kwargs: x
@@ -247,8 +272,15 @@ class TapeDenoiser(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
 
   def compute(self, latent, tape, tape_r, training):
     for i in range(len(self._num_layers)):
-      latent = self.read_units[str(i)](
-          latent, self._merge_tape(tape, tape_r), None, None, None, training)[0]
+      if self._cond_decoupled_read:
+        latent = self.read_cond_units[str(i)](
+            latent, tape_r, None, None, None, training)[0]
+        latent = self.read_units[str(i)](
+            latent, tape, None, None, None, training)[0]
+      else:
+        tape_merged = self._merge_tape(tape, tape_r)
+        latent = self.read_units[str(i)](
+            latent, tape_merged, None, None, None, training)[0]
       latent = self.latent_processing_units[str(i)](latent, None, training)
       tape = self.write_units[str(i)](
           tape, latent, None, None, None, training)[0]

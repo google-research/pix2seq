@@ -88,7 +88,7 @@ class WarmUpAndDecay(tf.keras.optimizers.schedules.LearningRateSchedule):
     return learning_rate
 
 
-class AdamWeightDecay(tf.keras.optimizers.Adam):
+class AdamWeightDecay(tf.keras.optimizers.legacy.Adam):
   """Adam enables L2 weight decay and clip_by_global_norm on gradients.
 
   Just adding the square of the weights to the loss function is *not* the
@@ -199,7 +199,7 @@ def build_optimizer(config, learning_rate):
         beta_1=config.beta1,
         beta_2=config.beta2,
         epsilon=config.eps)
-  elif config.optimizer == 'adamw':
+  elif config.optimizer == 'adamw_legacy':
     clipnorm = None if config.global_clipnorm <= 0 else config.global_clipnorm
     include_str = config.get('include_from_weight_decay', 'kernel')
     exclude_str = config.get('exclude_from_weight_decay', '')
@@ -212,6 +212,20 @@ def build_optimizer(config, learning_rate):
         global_clipnorm=clipnorm,
         include_in_weight_decay=include_str.split(',') if include_str else [],
         exclude_from_weight_decay=exclude_str.split(',') if exclude_str else [])
+  elif config.optimizer == 'adamw':
+    clipnorm = None if config.global_clipnorm <= 0 else config.global_clipnorm
+    exclude_str = config.get('exclude_from_weight_decay', '')
+    optimizer = tf.keras.optimizers.AdamW(
+        weight_decay=config.weight_decay,
+        learning_rate=learning_rate,
+        beta_1=config.beta1,
+        beta_2=config.beta2,
+        epsilon=config.eps,
+        global_clipnorm=clipnorm,
+        )
+    optimizer.exclude_from_weight_decay(
+        var_names=exclude_str.split(',') if exclude_str else [])
+    return optimizer
   elif config.optimizer == 'lamb':
     exclude_str = config.get('exclude_from_weight_decay', 'bias,beta,gamma,emb')
     return tfa.optimizers.LAMB(

@@ -143,7 +143,7 @@ class TaskObjectDetection(task_lib.Task):
     #   logits = tf.one_hot(pred_seq, mconfig.vocab_size)
     return examples, pred_seq, logits
 
-  def postprocess_tpu(self, batched_examples, pred_seq, logits, training=False):
+  def postprocess_tpu(self, batched_examples, pred_seq, logits, training=False):  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
     """Organizing results after fitting the batched examples in graph.
 
     Such as updating metrics, putting together results for computing metrics in
@@ -194,7 +194,7 @@ class TaskObjectDetection(task_lib.Task):
     return (images, image_ids, pred_bboxes, pred_bboxes_rescaled, pred_classes,
             scores, gt_classes, gt_bboxes, gt_bboxes_rescaled, area, is_crowd)
 
-  def postprocess_cpu(self, outputs, train_step,
+  def postprocess_cpu(self, outputs, train_step,  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
                       eval_step=None, training=False, summary_tag='eval',
                       ret_results=False):
     """CPU post-processing of outputs.

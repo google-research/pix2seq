@@ -98,6 +98,11 @@ class TFGANMetricEvaluator:
       with tf.io.gfile.GFile(filename, "rb") as fin:
         stats_real = np.load(fin)
         return stats_real["mu"], stats_real["cov"]
+    elif self.dataset_name == "coco":
+      filename = "{}/coco_stats_real.npz".format(stats_path)
+      with tf.io.gfile.GFile(filename, "rb") as fin:
+        stats_real = np.load(fin)
+      return stats_real["mu"], stats_real["cov"]
     else:
       logging.warn("Dataset %s stats not found!", self.dataset_name)
       return None, None

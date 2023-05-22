@@ -22,8 +22,9 @@ import tensorflow as tf
 class CityscapesPanopticDataset(dataset_lib.TFRecordDataset):
   """Cityscapes panoptic dataset."""
 
-  def get_feature_map(self):
+  def get_feature_map(self, training):
     """Returns feature map for parsing the TFExample."""
+    del training
     return {
         'image/encoded':
             tf.io.FixedLenFeature([], tf.string),

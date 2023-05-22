@@ -16,6 +16,8 @@
 """Transformer."""
 
 import math
+import re
+import einops
 
 from architectures import resnet
 import tensorflow as tf
@@ -449,17 +451,20 @@ class TransformerEncoderLayer(tf.keras.layers.Layer):  # pylint: disable=missing
                drop_path=0.1,
                drop_units=0.1,
                drop_att=0.,
+               self_attention=True,
                use_ffn_ln=False,
                ln_scale_shift=True,
                **kwargs):
     super(TransformerEncoderLayer, self).__init__(**kwargs)
-    self.mha_ln = tf.keras.layers.LayerNormalization(
-        epsilon=1e-6,
-        center=ln_scale_shift,
-        scale=ln_scale_shift,
-        name='mha/ln')
-    self.mha = tf.keras.layers.MultiHeadAttention(
-        num_heads, dim // num_heads, dropout=drop_att, name='mha')
+    self.self_attention = self_attention
+    if self_attention:
+      self.mha_ln = tf.keras.layers.LayerNormalization(
+          epsilon=1e-6,
+          center=ln_scale_shift,
+          scale=ln_scale_shift,
+          name='mha/ln')
+      self.mha = tf.keras.layers.MultiHeadAttention(
+          num_heads, dim // num_heads, dropout=drop_att, name='mha')
     self.mlp = MLP(1, dim, mlp_ratio, drop_path, drop_units,
                    use_ffn_ln=use_ffn_ln, ln_scale_shift=ln_scale_shift,
                    name='mlp')
@@ -467,9 +472,10 @@ class TransformerEncoderLayer(tf.keras.layers.Layer):  # pylint: disable=missing
 
   def call(self, x, mask, training):
     # x shape (bsz, seq_len, dim_att), mask shape (bsz, seq_len, seq_len).
-    x_ln = self.mha_ln(x)
-    x_residual = self.mha(x_ln, x_ln, x_ln, mask, training=training)
-    x = x + self.dropp(x_residual, training)
+    if self.self_attention:
+      x_ln = self.mha_ln(x)
+      x_residual = self.mha(x_ln, x_ln, x_ln, mask, training=training)
+      x = x + self.dropp(x_residual, training)
     x = self.mlp(x, training)
     return x
 
@@ -484,6 +490,7 @@ class TransformerEncoder(tf.keras.layers.Layer):  # pylint: disable=missing-docs
                drop_path=0.1,
                drop_units=0.1,
                drop_att=0.,
+               self_attention=True,
                use_ffn_ln=False,
                ln_scale_shift=True,
                **kwargs):
@@ -491,8 +498,15 @@ class TransformerEncoder(tf.keras.layers.Layer):  # pylint: disable=missing-docs
     self.num_layers = num_layers
     self.enc_layers = [
         TransformerEncoderLayer(  # pylint: disable=g-complex-comprehension
-            dim, mlp_ratio, num_heads, drop_path, drop_units, drop_att,
-            use_ffn_ln=use_ffn_ln, ln_scale_shift=ln_scale_shift,
+            dim,
+            mlp_ratio,
+            num_heads,
+            drop_path,
+            drop_units,
+            drop_att,
+            self_attention=self_attention,
+            use_ffn_ln=use_ffn_ln,
+            ln_scale_shift=ln_scale_shift,
             name='transformer_encoder' + suffix_id(i))
         for i in range(num_layers)
     ]
@@ -761,6 +775,7 @@ class AutoregressiveDecoder(tf.keras.layers.Layer):  # pylint: disable=missing-d
                pos_encoding='learned',
                shared_embedding=True,
                output_bias=True,
+               cross_attention=True,
                **kwargs):
     super(AutoregressiveDecoder, self).__init__(**kwargs)
     self.vocab_size = vocab_size
@@ -773,7 +788,8 @@ class AutoregressiveDecoder(tf.keras.layers.Layer):  # pylint: disable=missing-d
     add_vocab_token_emb(self, vocab_size, dim, shared_embedding, output_bias)
     self.decoder = TransformerDecoder(
         num_layers, dim, mlp_ratio, num_heads,
-        drop_path, drop_units, drop_att, name='transformer_decoder')
+        drop_path, drop_units, drop_att,
+        cross_attention=cross_attention, name='transformer_decoder')
     self.output_ln = tf.keras.layers.LayerNormalization(
         epsilon=1e-6, name='ouput_ln')
 
@@ -921,3 +937,556 @@ class AutoregressiveDecoder(tf.keras.layers.Layer):  # pylint: disable=missing-d
     sampled_tokens = tf.transpose(tokens_var[prompt_len:], [1, 0])
     sampled_tokens_logits = tf.transpose(logits_var[prompt_len:], [1, 0, 2])
     return sampled_tokens, sampled_tokens_logits
+
+
+def get_layer_config(layers_str):
+  layer_configs = []
+  if layers_str.endswith(')'):
+    layers_str += '0'
+  if not re.match(r'^(\([0-9]+\)[0-9]+)+$', layers_str):
+    raise ValueError(f'Unrecognized layer specification {layers_str}.')
+  blocks = re.findall(r'\([0-9]+\)[0-9]+', layers_str)
+  for i, block in enumerate(blocks):
+    x_layers, l_layers = map(int, re.findall('([0-9]+)', block))
+    if i < len(blocks) - 1:
+      assert l_layers > 0
+    layer_configs.append((x_layers, l_layers))
+  return layer_configs
+
+
+class FIT(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
+
+  def __init__(self,
+               layers,  # str format: (local-layers)global-layers.. eg '(2)4(2)'
+               x_size,
+               num_groups,
+               latents_per_group,
+               x_dim,
+               latent_dim,
+               x_num_heads,
+               latent_num_heads,
+               mlp_ratio=4,
+               drop_path=0.,
+               drop_units=0.,
+               drop_att=0.,
+               x_pos_encoding='learned',
+               latent_pos_encoding='learned',
+               mask='none',
+               **kwargs):
+    super().__init__(**kwargs)
+    if x_size % num_groups != 0:
+      raise ValueError(
+          f'x_size={x_size} is not divisible by num_groups={num_groups}')
+    x_per_group = x_size // num_groups
+    self.num_groups = num_groups
+    self.latents_per_group = latents_per_group
+    self.layer_configs = get_layer_config(layers)
+    self.mask = None
+    if mask == 'causal':
+      self.mask = 1. - get_chunk_ar_mask(
+          num_groups * latents_per_group, latents_per_group, dtype=tf.float32)
+    elif mask != 'none':
+      raise ValueError(f'Unknown mask {mask}')
+
+    self.stem = tf.keras.layers.Dense(x_dim, name='stem')
+    self.stem_ln = tf.keras.layers.LayerNormalization(
+        epsilon=1e-6, name='stem_ln')
+    self.stem_y = tf.keras.layers.Dense(x_dim, name='stem_y')
+    self.stem_y_ln = tf.keras.layers.LayerNormalization(
+        epsilon=1e-6, name='stem_y_ln')
+    self.latent_pos_emb = add_vis_pos_emb(
+        self, latent_pos_encoding, num_groups, latents_per_group, latent_dim,
+        name_prefix=f'{self.name}/latent_pos_emb/kernel',
+        return_only=True, normalization_max=1000.)
+    if x_pos_encoding == 'sin_cos2d':
+      s_ = tf.cast(tf.math.sqrt(tf.cast(x_per_group, tf.float32)), tf.int32)
+      self.x_pos_emb = add_vis_pos_emb(
+          self, 'sin_cos', s_, s_, x_dim,
+          name_prefix=f'{self.name}/x_pos_emb/kernel',
+          return_only=True, normalization_max=1000.)
+    else:
+      self.x_pos_emb = add_vis_pos_emb(
+          self, x_pos_encoding, x_per_group, 1, x_dim,
+          name_prefix=f'{self.name}/x_pos_emb/kernel',
+          return_only=True, normalization_max=1000.)
+
+    self.x2l_cross_attn = {}
+    self.l2x_cross_attn = {}
+    self.x_network = {}
+    self.l_network = {}
+    for i, (x_layers, l_layers) in enumerate(self.layer_configs):
+      self.x_network[str(i)] = TransformerEncoder(
+          x_layers,
+          x_dim,
+          mlp_ratio,
+          x_num_heads,
+          drop_path,
+          drop_units,
+          drop_att,
+          name='x_network' + suffix_id(i))
+      if l_layers > 0:
+        self.l2x_cross_attn[str(i)] = TransformerDecoderLayer(
+            dim=0,
+            mlp_ratio=0,
+            num_heads=min(latent_num_heads, x_num_heads),
+            drop_path=0.,
+            drop_units=0.,
+            drop_att=0.,
+            dim_x_att=min(latent_dim, x_dim),
+            self_attention=False,
+            cross_attention=True,
+            use_mlp=False,
+            use_enc_ln=True,
+            name='l2x_cross_attn' + suffix_id(i))
+        self.l_network[str(i)] = TransformerEncoder(
+            l_layers,
+            dim=latent_dim,
+            mlp_ratio=mlp_ratio,
+            num_heads=latent_num_heads,
+            drop_path=drop_path,
+            drop_units=drop_units,
+            drop_att=drop_att,
+            name='l_network' + suffix_id(i))
+      if i < len(self.layer_configs) - 1:
+        self.x2l_cross_attn[str(i)] = TransformerDecoderLayer(
+            dim=0,
+            mlp_ratio=0,
+            num_heads=min(x_num_heads, latent_num_heads),
+            drop_path=0.,
+            drop_units=0.,
+            drop_att=0.,
+            dim_x_att=min(latent_dim, x_dim),
+            self_attention=False,
+            cross_attention=True,
+            use_mlp=False,
+            use_enc_ln=True,
+            name='x2l_cross_attn' + suffix_id(i))
+    self.x_output_ln = tf.keras.layers.LayerNormalization(
+        epsilon=1e-6, name='x_output_ln')
+    self.l_output_ln = tf.keras.layers.LayerNormalization(
+        epsilon=1e-6, name='l_output_ln')
+
+  def call(self, x, y=None, training=True):
+    """x in [bsz, t, n, c], y in [bsz, t, m, k]."""
+    bsz = tf.shape(x)[0]
+    t, latents_per_group = self.num_groups, self.latents_per_group
+    x = self.stem_ln(self.stem(x))
+    x = x + self.x_pos_emb[tf.newaxis, tf.newaxis, ...]
+    if y is not None:
+      x = tf.concat([self.stem_y_ln(self.stem_y(y)), x], 2)
+    latents = tf.reshape(self.latent_pos_emb, [1, t, latents_per_group, -1])
+    latents = tf.tile(latents, [bsz, 1, 1, 1])
+
+    latents = einops.rearrange(latents, 'b t m d -> (b t) m d', t=t)
+    x = einops.rearrange(x, 'b t n c -> (b t) n c')
+    for i in range(len(self.layer_configs)):
+      x = self.x_network[str(i)](x, None, training=training)
+
+      if self.layer_configs[i][-1] > 0:
+        latents = self.l2x_cross_attn[str(i)](
+            latents, x, None, None, None, training=training)[0]
+        latents = einops.rearrange(latents, '(b t) m d -> b (t m) d', t=t)
+        latents = self.l_network[str(i)](latents, self.mask, training)
+        latents = einops.rearrange(latents, 'b (t m) d -> (b t) m d', t=t)
+        if i < len(self.layer_configs) - 1:
+          x = self.x2l_cross_attn[str(i)](
+              x, latents, None, None, None, training=training)[0]
+
+    x = einops.rearrange(x, '(b t) m d -> b t m d', t=t)
+    latents = einops.rearrange(latents, '(b t) m d -> b t m d', t=t)
+    return self.x_output_ln(x), self.l_output_ln(latents)
+
+
+class FITDenoiser(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
+
+  def __init__(self,
+               layers,  # str format: (local-layers)global-layers.. eg '(2)4(2)'
+               x_size,
+               num_groups,
+               latents_per_group,
+               x_dim,
+               latent_dim,
+               x_num_heads,
+               latent_num_heads,
+               out_dim,
+               mlp_ratio=4,
+               drop_path=0.,
+               drop_units=0.,
+               drop_att=0.,
+               x_pos_encoding='learned',
+               latent_pos_encoding='learned',
+               mask='none',
+               cond_proj=True,
+               self_cond='none',
+               x_self_attention=True,
+               xattn_with_mlp=False,
+               xattn_enc_ln=True,
+               **kwargs):
+    super().__init__(**kwargs)
+    if x_size % num_groups != 0:
+      raise ValueError(
+          f'x_size={x_size} is not divisible by num_groups={num_groups}')
+    x_per_group = x_size // num_groups
+    self.num_groups = num_groups
+    self.latents_per_group = latents_per_group
+    self.latent_dim = latent_dim
+    self.self_cond = self_cond
+    self.layer_configs = get_layer_config(layers)
+    self.mask = None
+    if mask == 'causal':
+      self.mask = 1. - get_chunk_ar_mask(
+          num_groups * latents_per_group, latents_per_group, dtype=tf.float32)
+    elif mask != 'none':
+      raise ValueError(f'Unknown mask {mask}')
+
+    self.stem = tf.keras.layers.Dense(x_dim, name='stem')
+    self.stem_ln = tf.keras.layers.LayerNormalization(
+        epsilon=1e-6, name='stem_ln')
+    self.time_emb = ScalarEmbedding(
+        dim=latent_dim // 4,
+        scaling=1000.,
+        expansion=4,
+        name='time_emb')
+    if cond_proj:
+      self.cond_proj = tf.keras.layers.Dense(latent_dim, name='cond_proj')
+    else:
+      self.cond_proj = lambda x: x
+    self.latent_pos_emb = add_vis_pos_emb(
+        self, latent_pos_encoding, num_groups, latents_per_group, latent_dim,
+        name_prefix=f'{self.name}/latent_pos_emb/kernel',
+        return_only=True, normalization_max=1000.)
+    self.x_pos_emb = add_vis_pos_emb(
+        self, x_pos_encoding, x_per_group, 1, x_dim,
+        name_prefix=f'{self.name}/x_pos_emb/kernel',
+        return_only=True, normalization_max=1000.)
+
+    if self_cond == 'latent':
+      self.latent_prev_proj = MLP(
+          num_layers=1,
+          dim=latent_dim,
+          mlp_ratio=mlp_ratio,
+          drop_path=0.,
+          drop_units=0.,
+          name='latent_prev_proj')
+      self.latent_prev_ln = tf.keras.layers.LayerNormalization(
+          epsilon=1e-6, gamma_initializer='zeros', name='latent_prev_ln')
+
+    self.x2l_cross_attn = {}
+    self.l2x_cross_attn = {}
+    self.l2c_cross_attn = {}
+    self.x_network = {}
+    self.l_network = {}
+    for i, (x_layers, l_layers) in enumerate(self.layer_configs):
+      self.x_network[str(i)] = TransformerEncoder(
+          x_layers,
+          x_dim,
+          mlp_ratio,
+          x_num_heads,
+          drop_path,
+          drop_units,
+          drop_att,
+          self_attention=x_self_attention,
+          name='x_network' + suffix_id(i))
+      if l_layers > 0:
+        self.l2x_cross_attn[str(i)] = TransformerDecoderLayer(
+            dim=latent_dim,
+            mlp_ratio=mlp_ratio,
+            num_heads=min(latent_num_heads, x_num_heads),
+            drop_path=0.,
+            drop_units=0.,
+            drop_att=0.,
+            dim_x_att=min(latent_dim, x_dim),
+            self_attention=False,
+            cross_attention=True,
+            use_mlp=xattn_with_mlp,
+            use_enc_ln=xattn_enc_ln,
+            name='l2x_cross_attn' + suffix_id(i))
+        self.l2c_cross_attn[str(i)] = TransformerDecoderLayer(
+            dim=0,
+            mlp_ratio=0,
+            num_heads=latent_num_heads,
+            drop_path=0.,
+            drop_units=0.,
+            drop_att=0.,
+            dim_x_att=latent_dim,
+            self_attention=False,
+            cross_attention=True,
+            use_mlp=False,
+            use_enc_ln=xattn_enc_ln,
+            name='l2c_cross_attn' + suffix_id(i))
+        self.l_network[str(i)] = TransformerEncoder(
+            l_layers,
+            dim=latent_dim,
+            mlp_ratio=mlp_ratio,
+            num_heads=latent_num_heads,
+            drop_path=drop_path,
+            drop_units=drop_units,
+            drop_att=drop_att,
+            name='l_network' + suffix_id(i))
+      if i < len(self.layer_configs) - 1:
+        self.x2l_cross_attn[str(i)] = TransformerDecoderLayer(
+            dim=x_dim,
+            mlp_ratio=mlp_ratio,
+            num_heads=min(x_num_heads, latent_num_heads),
+            drop_path=0.,
+            drop_units=0.,
+            drop_att=0.,
+            dim_x_att=min(latent_dim, x_dim),
+            self_attention=False,
+            cross_attention=True,
+            use_mlp=xattn_with_mlp,
+            use_enc_ln=xattn_enc_ln,
+            name='x2l_cross_attn' + suffix_id(i))
+    self.x_output_ln = tf.keras.layers.LayerNormalization(
+        epsilon=1e-6, name='x_output_ln')
+    self.x_output_linear = tf.keras.layers.Dense(
+        out_dim, name='x_output_linear')
+
+  @property
+  def hidden_shapes(self):
+    return [[self.num_groups, self.latents_per_group, self.latent_dim]]
+
+  def initialize_cond(self, t, cond, training):
+    t = tf.expand_dims(self.time_emb(t, last_swish=False, normalize=True), 1)
+    cond = self.cond_proj(cond)
+    if cond.shape.ndims == 2:
+      cond = tf.expand_dims(cond, 1)
+    return t, cond
+
+  def initialize_latent(self, batch_size, latents_prev, training):
+    latents = tf.reshape(self.latent_pos_emb,
+                         [1, self.num_groups, self.latents_per_group, -1])
+    latents = tf.tile(latents, [batch_size, 1, 1, 1])
+    if self.self_cond in ['latent']:
+      latents += self.latent_prev_ln(self.latent_prev_proj(latents_prev))
+    return latents
+
+  def call(self, x, time, cond, training=True):
+    """x[0] in (bsz, t, n, c), time in (bsz, m), cond in (bsz, s, d)."""
+    if isinstance(x, tuple) or isinstance(x, list):
+      x, latents_prev = x
+      bsz = tf.shape(x)[0]
+    else:
+      bsz = tf.shape(x)[0]
+      latents_prev = tf.zeros([bsz] + self.hidden_shapes[0])
+    bsz = tf.shape(x)[0]
+    t = self.num_groups
+    x = self.stem_ln(self.stem(x))
+    x = x + self.x_pos_emb[tf.newaxis, tf.newaxis, ...]
+    latents = self.initialize_latent(bsz, latents_prev, training)
+    time, cond = self.initialize_cond(time, cond, training)
+    cond = tf.concat([time, cond], 1)
+
+    latents = einops.rearrange(latents, 'b t m d -> (b t) m d', t=t)
+    x = einops.rearrange(x, 'b t n c -> (b t) n c')
+    for i in range(len(self.layer_configs)):
+      x = self.x_network[str(i)](x, None, training=training)
+      if self.layer_configs[i][-1] > 0:
+        latents = self.l2x_cross_attn[str(i)](
+            latents, x, None, None, None, training=training)[0]
+        latents = einops.rearrange(latents, '(b t) m d -> b (t m) d', t=t)
+        latents = self.l2c_cross_attn[str(i)](
+            latents, cond, None, None, None, training=training)[0]
+        latents = self.l_network[str(i)](latents, self.mask, training)
+        latents = einops.rearrange(latents, 'b (t m) d -> (b t) m d', t=t)
+        if i < len(self.layer_configs) - 1:
+          x = self.x2l_cross_attn[str(i)](
+              x, latents, None, None, None, training=training)[0]
+
+    x = einops.rearrange(x, '(b t) m d -> b t m d', t=t)
+    latents = einops.rearrange(latents, '(b t) m d -> b t m d', t=t)
+    return self.x_output_linear(self.x_output_ln(x)), latents
+
+
+class ScalarEmbedding(tf.keras.layers.Layer):
+  """Scalar embedding layers.
+
+  Assume the first input dim to be time, and rest are optional features.
+  """
+
+  def __init__(self, dim, scaling, expansion=4, **kwargs):
+    super().__init__(**kwargs)
+    self.scalar_encoding = lambda x: positional_encoding(x*scaling, dim)
+    self.dense_0 = tf.keras.layers.Dense(
+        dim * expansion,
+        kernel_initializer=get_variable_initializer(1.),
+        name='dense0')
+    self.dense_1 = tf.keras.layers.Dense(
+        dim * expansion,
+        kernel_initializer=get_variable_initializer(1.),
+        name='dense1')
+
+  def call(self, x, last_swish=True, normalize=False):
+    y = None
+    if x.shape.rank > 1:
+      assert x.shape.rank == 2
+      x, y = x[..., 0], x[..., 1:]
+    x = self.scalar_encoding(x)[0]
+    if normalize:
+      x_mean = tf.reduce_mean(x, -1, keepdims=True)
+      x_std = tf.math.reduce_std(x, -1, keepdims=True)
+      x = (x - x_mean) / x_std
+    x = tf.nn.silu(self.dense_0(x))
+    x = x if y is None else tf.concat([x, y], -1)
+    x = self.dense_1(x)
+    return tf.nn.silu(x) if last_swish else x
+
+
+class FITAR(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
+
+  def __init__(self,
+               layers,  # str format: (local-layers)global-layers.. eg '(2)4(2)'
+               x_size,
+               num_groups,
+               latents_per_group,
+               x_dim,
+               latent_dim,
+               x_num_heads,
+               latent_num_heads,
+               mlp_ratio,
+               vocab_size,
+               shared_embedding=True,
+               output_bias=True,
+               drop_path=0.0,
+               drop_units=0.0,
+               drop_att=0.0,
+               x_pos_encoding='learned',
+               latent_pos_encoding='learned',
+               **kwargs):
+    super().__init__(**kwargs)
+    if x_size % num_groups != 0:
+      raise ValueError(
+          f'x_size={x_size} is not divisible by num_groups={num_groups}')
+    x_per_group = x_size // num_groups
+    self.num_groups = num_groups
+    self.latents_per_group = latents_per_group
+    self.shared_embedding = shared_embedding
+    self.output_bias = output_bias
+    self.layer_configs = get_layer_config(layers)
+    self.x_mask = 1. - get_ar_mask(x_per_group, dtype=tf.float32)
+    self.l_mask = 1. - get_chunk_ar_mask(
+        num_groups * latents_per_group, latents_per_group, dtype=tf.float32)
+
+    self.latent_pos_emb = add_vis_pos_emb(
+        self, latent_pos_encoding, num_groups, latents_per_group, latent_dim,
+        name_prefix=f'{self.name}/latent_pos_emb/kernel',
+        return_only=True, normalization_max=1000.)
+    self.x_pos_emb = add_vis_pos_emb(
+        self, x_pos_encoding, x_per_group, 1, x_dim,
+        name_prefix=f'{self.name}/x_pos_emb/kernel',
+        return_only=True, normalization_max=1000.)
+    add_vocab_token_emb(
+        self, vocab_size, x_dim, shared_embedding, output_bias)
+
+    self.x2l_cross_attn = {}
+    self.l2x_cross_attn = {}
+    self.x_network = {}
+    self.l_network = {}
+    for i, (x_layers, l_layers) in enumerate(self.layer_configs):
+      self.x_network[str(i)] = TransformerDecoder(
+          x_layers,
+          dim=x_dim,
+          mlp_ratio=mlp_ratio,
+          num_heads=x_num_heads,
+          drop_path=drop_path,
+          drop_units=drop_units,
+          drop_att=drop_att,
+          cross_attention=False,
+          name='x_network' + suffix_id(i))
+      if l_layers > 0:
+        self.l2x_cross_attn[str(i)] = TransformerDecoderLayer(
+            dim=0,
+            mlp_ratio=0,
+            num_heads=min(latent_num_heads, x_num_heads),
+            drop_path=0.,
+            drop_units=0.,
+            drop_att=0.,
+            dim_x_att=min(latent_dim, x_dim),
+            self_attention=False,
+            cross_attention=True,
+            use_mlp=False,
+            use_enc_ln=True,
+            name='l2x_cross_attn' + suffix_id(i))
+        self.l_network[str(i)] = TransformerDecoder(
+            l_layers,
+            dim=latent_dim,
+            mlp_ratio=mlp_ratio,
+            num_heads=latent_num_heads,
+            drop_path=drop_path,
+            drop_units=drop_units,
+            drop_att=drop_att,
+            cross_attention=False,
+            name='l_network' + suffix_id(i))
+      if i < len(self.layer_configs) - 1:
+        self.x2l_cross_attn[str(i)] = TransformerDecoderLayer(
+            dim=0,
+            mlp_ratio=0,
+            num_heads=min(x_num_heads, latent_num_heads),
+            drop_path=0.,
+            drop_units=0.,
+            drop_att=0.,
+            dim_x_att=min(latent_dim, x_dim),
+            self_attention=False,
+            cross_attention=True,
+            use_mlp=False,
+            use_enc_ln=True,
+            name='x2l_cross_attn' + suffix_id(i))
+    self.x_output_ln = tf.keras.layers.LayerNormalization(
+        epsilon=1e-6, name='x_output_ln')
+    self.l_output_ln = tf.keras.layers.LayerNormalization(
+        epsilon=1e-6, name='l_output_ln')
+
+  def _latent_shift(self, latents, s_len):
+    """latents shape change: b t m d -> (b t) m d."""
+    latents_leading, latents_last = latents[:, :-1], latents[:, -1:]
+    latents = tf.concat([tf.zeros_like(latents_last), latents_leading], axis=1)
+    latents = einops.rearrange(latents, 'b t m d -> (b t) m d', t=s_len)
+    return latents, latents_last
+
+  def _latent_shift_back(self, latents, latents_last, s_len):
+    """latents shape change: (b t) m d -> b t m d."""
+    latents = einops.rearrange(latents, '(b t) m d -> b t m d', t=s_len)
+    latents = tf.concat([latents[:, 1:], latents_last], axis=1)
+    return latents
+
+  def call(self, x, encoded=None, training=True):
+    """x (e.g. token id) is an integer tensor with shape of [bsz, t, n]."""
+    del encoded  # not implemented.
+    bsz = tf.shape(x)[0]
+    t = self.num_groups
+    x_mask, l_mask = self.x_mask, self.l_mask
+    if self.shared_embedding:
+      inp_embedding = outp_embedding = self.token_embedding
+    else:
+      inp_embedding = self.inp_token_embedding
+      outp_embedding = self.outp_token_embedding
+    x = tf.gather(inp_embedding, x)
+    x = x + self.x_pos_emb[tf.newaxis, tf.newaxis, ...]
+    latents = tf.reshape(self.latent_pos_emb,
+                         [1, t, self.latents_per_group, -1])
+    latents = tf.tile(latents, [bsz, 1, 1, 1])
+
+    x = einops.rearrange(x, 'b t n c -> (b t) n c')
+    for i in range(len(self.layer_configs)):
+      x = self.x_network[str(i)](
+          x, None, None, x_mask, None, training=training)[0]
+
+      if self.layer_configs[i][-1] > 0:
+        latents = einops.rearrange(latents, 'b t m d -> (b t) m d')
+        latents = self.l2x_cross_attn[str(i)](
+            latents, x, None, None, None, training=training)[0]
+        latents = einops.rearrange(latents, '(b t) m d -> b (t m) d', t=t)
+        latents = self.l_network[str(i)](
+            latents, None, None, l_mask, None, training=training)[0]
+        latents = einops.rearrange(latents, 'b (t m) d -> b t m d', t=t)
+        if i < len(self.layer_configs) - 1:
+          latents, latents_last = self._latent_shift(latents, t)
+          x = self.x2l_cross_attn[str(i)](
+              x, latents, None, None, None, training=training)[0]
+          latents = self._latent_shift_back(latents, latents_last, t)
+
+    x = einops.rearrange(x, '(b t) n d -> b t n d', t=t)
+    logits = tf.einsum('btnd,kd->btnk', self.x_output_ln(x), outp_embedding)
+    if self.output_bias:
+      logits = tf.nn.bias_add(logits, self.outp_bias)
+    return logits

@@ -105,7 +105,7 @@ class TaskPanopticSegmentation(task_lib.Task):
           masks_pred, m_cfg.image_size, method='nearest')
     return examples, masks_pred
 
-  def postprocess_tpu(self, batched_examples, predictions, training=False):
+  def postprocess_tpu(self, batched_examples, predictions, training=False):  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
     """Organizing results after fitting the batched examples in graph.
 
     Such as updating metrics, putting together results for computing metrics in
@@ -130,7 +130,7 @@ class TaskPanopticSegmentation(task_lib.Task):
             batched_examples['unpadded_image_size'], predictions,
             label_map_orig)
 
-  def postprocess_cpu(self, outputs, train_step,
+  def postprocess_cpu(self, outputs, train_step,  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
                       eval_step=None, training=False, summary_tag='eval',
                       ret_results=False):
     """CPU post-processing of outputs.

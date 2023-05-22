@@ -49,8 +49,9 @@ def _xy_to_yx(tensor):
 class CocoObjectDetectionTFRecordDataset(dataset_lib.TFRecordDataset):
   """Coco object detection dataset."""
 
-  def get_feature_map(self):
+  def get_feature_map(self, training):
     """Returns feature map for parsing the TFExample."""
+    del training
     image_feature_map = decode_utils.get_feature_map_for_image()
     detection_feature_map = decode_utils.get_feature_map_for_object_detection()
     return {**image_feature_map, **detection_feature_map}
@@ -99,7 +100,7 @@ class CocoObjectDetectionTFRecordDataset(dataset_lib.TFRecordDataset):
 class CocoInstanceSegmentationTFRecordDataset(dataset_lib.TFRecordDataset):
   """Coco instance segmentation dataset."""
 
-  def get_feature_map(self):
+  def get_feature_map(self, unused_training):
     """Returns feature map for parsing the TFExample."""
     image_feature_map = decode_utils.get_feature_map_for_image()
     detection_feature_map = decode_utils.get_feature_map_for_object_detection()
@@ -171,8 +172,9 @@ class CocoInstanceSegmentationTFRecordDataset(dataset_lib.TFRecordDataset):
 class CocoKeypointDetectionTFRecordDataset(dataset_lib.TFRecordDataset):
   """Coco keypoint detection dataset."""
 
-  def get_feature_map(self):
+  def get_feature_map(self, training):
     """Returns feature map for parsing the TFExample."""
+    del training
     image_feature_map = decode_utils.get_feature_map_for_image()
     detection_feature_map = decode_utils.get_feature_map_for_object_detection()
     key_feature_map = decode_utils.get_feature_map_for_keypoint_detection()
@@ -266,8 +268,9 @@ class CocoKeypointDetectionTFRecordDataset(dataset_lib.TFRecordDataset):
 class CocoCaptioningTFRecordDataset(dataset_lib.TFRecordDataset):
   """Coco captioning dataset."""
 
-  def get_feature_map(self):
+  def get_feature_map(self, training):
     """Returns feature map for parsing the TFExample."""
+    del training
     image_feature_map = decode_utils.get_feature_map_for_image()
     cap_feature_map = decode_utils.get_feature_map_for_captioning()
     return {**image_feature_map, **cap_feature_map}

@@ -15,6 +15,7 @@
 # ==============================================================================
 """Train and eval script."""
 
+import collections
 import copy
 import json
 import os
@@ -32,7 +33,9 @@ from data import datasets  # pylint: disable=unused-import
 from data import transforms  # pylint: disable=unused-import
 from metrics import coco_metrics  # pylint: disable=unused-import
 from models import ar_model  # pylint: disable=unused-import
+from models import image_ar_model  # pylint: disable=unused-import
 from models import image_diffusion_model  # pylint: disable=unused-import
+from models import latent_diffusion_model  # pylint: disable=unused-import
 from models import video_diffusion_model  # pylint: disable=unused-import
 from models import image_discrete_diffusion_model  # pylint: disable=unused-import
 from models import model as model_lib
@@ -70,11 +73,66 @@ config_flags.DEFINE_config_file(
 FLAGS = flags.FLAGS
 
 
-def get_task_and_dataset(config: ml_collections.ConfigDict):
-  """Returns `Task` class instance and `Dataset` class instance."""
-  task = task_lib.TaskRegistry.lookup(config.task.name)(config)
-  dataset = dataset_lib.DatasetRegistry.lookup(config.dataset.name)(config)
-  return task, dataset
+def build_tasks_and_datasets(config: ml_collections.ConfigDict, training: bool):
+  """Build tasks and datasets.
+
+  Args:
+    config: Config.
+    training: bool.
+
+  Returns:
+    tasks: a list of task objects.
+    mixed_datasets: a list of tf.data.Dataset corresponding to tasks.
+    last_dataset: the last dataset_lib.Dataset instance.
+  """
+  mixed_datasets = []
+  tasks = []
+
+  # There are N tasks and N datasets. The same task may appear multiple times
+  # but corresponds to different datasets, e.g. [task1, task1, task2] and
+  # [ds1, ds2, ds3]. In this case, we create one td.data.Dataset for task1,
+  # sampling from ds1 and ds2 according to weights.
+  # First we keep track of datasets and weights for each task:
+  t_name_to_t_config_map = {}
+  t_name_to_ds_config_map = collections.defaultdict(list)
+  t_name_to_weights_map = collections.defaultdict(list)
+  for t_config, ds_config in zip(config.tasks, config.datasets):
+    if t_config.name not in t_name_to_t_config_map:
+      t_name_to_t_config_map[t_config.name] = t_config
+    else:
+      # Accumulate weight for task.
+      t_name_to_t_config_map[t_config.name].weight += t_config.weight
+    t_name_to_weights_map[t_config.name].append(t_config.weight)
+    t_name_to_ds_config_map[t_config.name].append(ds_config)
+
+  # For each task, create the Task instance and the dataset instance.
+  for t_name, t_config in t_name_to_t_config_map.items():
+    task_config = copy.deepcopy(config)
+    task_config.task = t_config
+    task = task_lib.TaskRegistry.lookup(t_name)(config)
+    tasks.append(task)
+
+    ds_configs = t_name_to_ds_config_map[t_name]
+    ds_weights = t_name_to_weights_map[t_name]
+    ds_weights = [w / sum(ds_weights) for w in ds_weights]
+
+    # Build dataset for this task.
+    input_fns = []
+    for ds_config in ds_configs:
+      task_ds_config = copy.deepcopy(task_config)
+      task_ds_config.dataset = ds_config
+      ds = dataset_lib.DatasetRegistry.lookup(ds_config.name)(task_ds_config)
+      input_fns.append(ds.pipeline(
+          process_single_example=task.preprocess_single,
+          global_batch_size=(
+              config.train.batch_size if training else config.eval.batch_size
+          ),
+          training=training,
+      ))
+    mixed_ds = dataset_lib.mix_datasets(input_fns, ds_weights)
+    mixed_datasets.append(mixed_ds)
+
+  return tasks, mixed_datasets, ds
 
 
 def perform_evaluation(config, dataset, task, eval_steps, ckpt, strategy):
@@ -215,24 +273,12 @@ def main(unused_argv):
   config.training = training
 
   with strategy.scope():
-    if 'tasks' not in config or len(config.tasks) == 1:  # allow config override
+    # Allow config override: for eval, only take one task and one dataset.
+    if 'tasks' not in config or len(config.tasks) == 1 or not training:
       config.tasks = [config.task]
-    if 'datasets' not in config or len(config.datasets) == 1:
+    if 'datasets' not in config or len(config.datasets) == 1 or not training:
       config.datasets = [config.dataset]
-    dses = []
-    tasks = []
-    for c_task, c_dataset in zip(config.tasks, config.datasets):
-      task_config = copy.deepcopy(config)
-      task_config.task = c_task
-      task_config.dataset = c_dataset
-      task, dataset = get_task_and_dataset(task_config)
-      ds = dataset.pipeline(
-          process_single_example=task.preprocess_single,
-          global_batch_size=(
-              config.train.batch_size if training else config.eval.batch_size),
-          training=training)
-      dses.append(ds)
-      tasks.append(task)
+    tasks, dses, dataset = build_tasks_and_datasets(config, training)
 
     # Calculate steps stuff using last task info (assuming all tasks the same.)
     train_steps = utils.get_train_steps(
@@ -249,12 +295,17 @@ def main(unused_argv):
     perform_training(config, dses, tasks, train_steps, checkpoint_steps,
                      dataset.num_train_examples, strategy)
   else:
+    # For eval, only one task and one dataset is passed in.
+    assert len(dses) == 1, 'Only one dataset is accepted in eval.'
+    assert len(tasks) == 1, 'Only one task is accepted in eval.'
+
     checkpoint_dir = config.eval.get('checkpoint_dir', None)
     if not checkpoint_dir:
       checkpoint_dir = FLAGS.model_dir
     for ckpt in tf.train.checkpoints_iterator(
         checkpoint_dir, min_interval_secs=15):
-      result = perform_evaluation(config, ds, task, eval_steps, ckpt, strategy)
+      result = perform_evaluation(config, dses[0], tasks[0], eval_steps, ckpt,
+                                  strategy)
       if result['global_step'] >= train_steps:
         logging.info('Eval complete. Exiting...')
         break

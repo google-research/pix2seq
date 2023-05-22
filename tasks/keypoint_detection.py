@@ -199,7 +199,7 @@ class TaskKeypointDetection(task_lib.Task):
 
     return examples, pred_seq, logits, pred_classes, pred_bboxes, scores
 
-  def postprocess_tpu(self, batched_examples, pred_seq, logits, pred_classes,
+  def postprocess_tpu(self, batched_examples, pred_seq, logits, pred_classes,  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
                       pred_bboxes, scores, training=False):
     """Organizing results after fitting the batched examples in graph.
 
@@ -283,7 +283,7 @@ class TaskKeypointDetection(task_lib.Task):
     return (images, image_ids, [n_instances], pred_points, pred_points_rescaled,
             pred_classes, pred_bboxes, scores)
 
-  def postprocess_cpu(self, outputs, train_step,
+  def postprocess_cpu(self, outputs, train_step,  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
                       eval_step=None, training=False, summary_tag='eval',
                       ret_results=True):
     """CPU post-processing of outputs.

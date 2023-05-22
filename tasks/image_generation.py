@@ -14,9 +14,13 @@
 # limitations under the License.
 # ==============================================================================
 """Task for image generation."""
+
+import os
+
 from absl import logging
 import ml_collections
 import utils
+from data import data_utils
 from metrics.fid import TFGANMetricEvaluator
 from tasks import task as task_lib
 import tensorflow as tf
@@ -29,9 +33,18 @@ class TaskImageGeneration(task_lib.Task):  # pytype: disable=base-class-error
   def __init__(self, config: ml_collections.ConfigDict):
     super().__init__(config)
     self._metrics = {}
+    self._metrics['eval_loss'] = tf.keras.metrics.Mean('eval_loss')
     self._tfgan_evaluator = TFGANMetricEvaluator(
         dataset_name=config.dataset.tfds_name,
         image_size=config.dataset.image_size)
+
+    self._write_images_to_file = config.eval.get('write_images_to_file', False)
+    if self._write_images_to_file:
+      self._tfrecord_dir = os.path.join(config.model_dir, 'images',
+                                        config.eval.tag)
+      if not tf.io.gfile.exists(self._tfrecord_dir):
+        tf.io.gfile.makedirs(self._tfrecord_dir)
+      self._tfrecord_writer = None
 
   def preprocess_single(self, dataset, batch_duplicates, training):
     """Task-specific preprocessing of individual example in the dataset.
@@ -89,12 +102,17 @@ class TaskImageGeneration(task_lib.Task):  # pytype: disable=base-class-error
   def infer(self, model, preprocessed_outputs):
     """Perform inference given the model and preprocessed outputs."""
     images, labels, examples = preprocessed_outputs
-    samples = model.sample(
+    outputs = model.sample(
         num_samples=tf.shape(images)[0],
         iterations=self.config.model.infer_iterations,
         method=self.config.model.sampler_name,
         images=images,
         labels=labels)
+    if isinstance(outputs, tuple) or isinstance(outputs, list):
+      samples, eval_loss = outputs
+      self._metrics['eval_loss'].update_state(eval_loss)
+    else:
+      samples = outputs
     return examples, samples
 
   def postprocess_tpu(self,
@@ -118,7 +136,13 @@ class TaskImageGeneration(task_lib.Task):  # pytype: disable=base-class-error
       results for passing to `postprocess_cpu` which runs in CPU mode.
     """
     logging.info('Start postprocess_tpu.')
-    images = examples['image']
+    # Get ground-truth images.
+    if 'original_image' in examples:
+      images = examples['original_image']
+    elif examples['image'].shape[-1] == 3:
+      images = examples['image']
+    else:  # ground-truth images not available in the dataset.
+      images = samples
 
     # FID
     data_real, data_gen = self._tfgan_evaluator.preprocess_inputs(
@@ -169,6 +193,15 @@ class TaskImageGeneration(task_lib.Task):  # pytype: disable=base-class-error
       tf.summary.image(
           f'{summary_tag}/samples_{eval_step}', images_sum, step=train_step)
 
+    # Write gt and samples to tfrecord.
+    if self._write_images_to_file:
+      if self._tfrecord_writer is None:
+        self._tfrecord_writer = tf.io.TFRecordWriter(
+            os.path.join(self._tfrecord_dir, f'step-{train_step}.tfrecord'))
+      for i in range(bsz):
+        ex_str = create_tf_example(images[i], samples[i])
+        self._tfrecord_writer.write(ex_str)
+
     logging.info('postprocess_cpu done.')
     if ret_results:
       return {'gt': images, 'pred': samples}
@@ -189,6 +222,33 @@ class TaskImageGeneration(task_lib.Task):  # pytype: disable=base-class-error
       metric.reset_states()
 
     self._tfgan_evaluator.reset()
+    if self._write_images_to_file:
+      self._tfrecord_writer.close()
+      self._tfrecord_writer = None
+
+
+
+
+def create_tf_example(ref, hyp):
+  """Creates a serialized tf example that stores the images.
+
+  Args:
+    ref: Tensor of [h, w, c], the ground-truth image.
+    hyp: Tensor of [h, w, c], the generated image.
+
+  Returns:
+    the serialized tf example.
+  """
+  ref_bytes = tf.io.encode_png(
+      tf.image.convert_image_dtype(ref, tf.uint8)).numpy()
+  hyp_bytes = tf.io.encode_png(
+      tf.image.convert_image_dtype(hyp, tf.uint8)).numpy()
+  feature = {
+      'hyp': tf.train.Feature(bytes_list=tf.train.BytesList(value=[hyp_bytes])),
+      'ref': tf.train.Feature(bytes_list=tf.train.BytesList(value=[ref_bytes])),
+  }
+  return tf.train.Example(
+      features=tf.train.Features(feature=feature)).SerializeToString()
 
 
 def preprocess_image(image,
@@ -212,7 +272,7 @@ def preprocess_image(image,
   """
   image = tf.image.convert_image_dtype(image, dtype=tf.float32)
   if cropping == 'center':
-    image = largest_center_square(image)
+    image = data_utils.largest_center_square_crop(image)
     image = tf.image.resize(
         image,
         size=(height, width),
@@ -226,15 +286,5 @@ def preprocess_image(image,
       image = tf.image.random_flip_left_right(image)
     elif flipping != 'none':
       raise ValueError(f'Unknown flipping method {flipping}')
-  image = tf.reshape(image, [height, width, 3])   # Let arch knows the shape.
+  image = tf.ensure_shape(image, [height, width, 3])   # Let arch knows shape.
   return image
-
-
-def largest_center_square(image):
-  """Crops largest center square out of the given image."""
-  h, w = tf.shape(image)[0], tf.shape(image)[1]
-  if h > w:
-    h_offset, w_offset, h = (h - w) // 2, 0, w
-  else:
-    h_offset, w_offset, w = 0, (w - h) // 2, h
-  return image[h_offset:h_offset + h, w_offset:w_offset + w, :]

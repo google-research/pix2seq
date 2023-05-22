@@ -520,6 +520,16 @@ def fixed_size_crop(features, labels, target_height, target_width,
   return crop_deprecated(features, labels, region, object_coordinate_keys)
 
 
+def largest_center_square_crop(image):
+  """Crops largest center square out of the given image."""
+  h, w = tf.shape(image)[0], tf.shape(image)[1]
+  if h > w:
+    h_offset, w_offset, h = (h - w) // 2, 0, w
+  else:
+    h_offset, w_offset, w = 0, (w - h) // 2, h
+  return image[h_offset:h_offset + h, w_offset:w_offset + w, :]
+
+
 def random_crop(features, labels, scale, ratio, object_coordinate_keys):
   """Crops image to random aspect ratio.
 

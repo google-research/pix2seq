@@ -98,6 +98,10 @@ class Model(tf.keras.models.Model):
           time_on_latent=config.time_on_latent,
           cond_on_latent_n=1 if config.cond_on_latent else 0,
           cond_tape_writable=config.cond_tape_writable,
+          cond_dim=config.cond_dim,
+          cond_proj=config.cond_proj,
+          cond_decoupled_read=config.cond_decoupled_read,
+          xattn_enc_ln=config.xattn_enc_ln,
           name=config.arch_name)
       self.denoiser = ImageTapeDenoiser(**m_kwargs)
       self.denoiser_ema = ImageTapeDenoiser(**m_kwargs, trainable=False)

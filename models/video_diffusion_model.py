@@ -72,6 +72,7 @@ class Model(image_diffusion_model.Model):
         time_on_latent=config.time_on_latent,
         cond_on_latent_n=1 if config.cond_on_latent else 0,
         cond_tape_writable=config.cond_tape_writable,
+        xattn_enc_ln=config.xattn_enc_ln,
         name=config.arch_name)
     self.denoiser = model_fn(name='denoiser')
     self.denoiser_ema = model_fn(name='denoiser', trainable=False)

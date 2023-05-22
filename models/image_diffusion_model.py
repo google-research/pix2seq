@@ -15,9 +15,12 @@
 # ==============================================================================
 """The image diffusion model."""
 
+import math
 import ml_collections
 
+import utils
 from architectures.tape import ImageTapeDenoiser
+from architectures.transformers import FITDenoiser
 from architectures.transunet import TransUNet
 from models import diffusion_utils
 from models import model as model_lib
@@ -30,8 +33,7 @@ class Model(tf.keras.models.Model):
 
   def __init__(self, config: ml_collections.ConfigDict, **kwargs):
     super().__init__(**kwargs)
-    image_size = config.dataset.image_size
-    self.image_size = image_size
+    self.image_size = config.dataset.image_size
     self.num_classes = config.dataset.num_classes
     config = config.model
     self.config = config
@@ -40,14 +42,13 @@ class Model(tf.keras.models.Model):
       self.x0_clip = '{},{}'.format(-config.b_scale, config.b_scale)
     else:
       self.x0_clip = config.x0_clip
-    self.x_channels = 3
     if config.arch_name == 'transunet':
       if ',' in config.kernel_sizes:
         kernel_sizes = [int(x) for x in config.kernel_sizes.split(',')]
       else:
         kernel_sizes = int(config.kernel_sizes)
       m_kwargs = dict(
-          out_dim=self.x_channels,
+          out_dim=self.sample_shape[-1],
           dim=config.dim,
           in_strides=config.in_strides,
           in_kernel_size=config.in_kernel_size,
@@ -81,9 +82,9 @@ class Model(tf.keras.models.Model):
           rw_num_heads=config.rw_num_heads,
           conv_kernel_size=config.conv_kernel_size,
           conv_drop_units=config.conv_drop_units,
-          image_height=image_size,
-          image_width=image_size,
-          image_channels=self.x_channels,
+          image_height=self.sample_shape[0],
+          image_width=self.sample_shape[1],
+          image_channels=self.sample_shape[-1],
           patch_size=config.patch_size,
           latent_pos_encoding=config.latent_pos_encoding,
           tape_pos_encoding=config.tape_pos_encoding,
@@ -95,6 +96,10 @@ class Model(tf.keras.models.Model):
           time_on_latent=config.time_on_latent,
           cond_on_latent_n=1 if config.cond_on_latent else 0,
           cond_tape_writable=config.cond_tape_writable,
+          cond_dim=config.cond_dim,
+          cond_proj=config.cond_proj,
+          cond_decoupled_read=config.cond_decoupled_read,
+          xattn_enc_ln=config.xattn_enc_ln,
           name=config.arch_name)
       self.denoiser = ImageTapeDenoiser(**m_kwargs)
       self.denoiser_ema = ImageTapeDenoiser(**m_kwargs, trainable=False)
@@ -106,16 +111,24 @@ class Model(tf.keras.models.Model):
     if self.hidden_shapes is not None:  # latent self-cond
       assert config.self_cond not in ['x', 'eps', 'auto']
 
+  @property
+  def sample_shape(self):
+    return [self.image_size, self.image_size, 3]
+
   def get_cond_denoise(self, labels):
     config = self.config
     def cond_denoise(x, gamma, training, drop_label=False):
       gamma = tf.reshape(gamma, [-1])
       cond = None
-      if config.conditional == 'class':
+      if config.conditional == 'class' or config.conditional == 'text':
         cond_dropout = config.get('cond_dropout', 0.)
         labels_w = 1.
         if training and cond_dropout > 0:
-          labels_w = tf.random.uniform([tf.shape(labels)[0], 1]) > cond_dropout
+          if config.conditional == 'class':
+            label_shape = [tf.shape(labels)[0], 1]
+          else:
+            label_shape = [tf.shape(labels)[0], 1, 1]
+          labels_w = tf.random.uniform(label_shape) > cond_dropout
           labels_w = tf.cast(labels_w, tf.float32)
         if drop_label:
           labels_w = 0.
@@ -151,12 +164,13 @@ class Model(tf.keras.models.Model):
 
   def sample(self, num_samples=100, iterations=100, method='ddim', **kwargs):
     config = self.config
-    samples_shape = [
-        num_samples, self.image_size, self.image_size, self.x_channels]
+    samples_shape = [num_samples, *self.sample_shape]
     if config.conditional == 'class':
       labels = tf.random.uniform(
           [num_samples], 0, self.num_classes, dtype=tf.int32)
       labels = tf.one_hot(labels, self.num_classes)
+    elif config.conditional == 'text':
+      labels = kwargs['labels']
     else:
       labels = None
     samples = self.scheduler.generate(
@@ -172,7 +186,15 @@ class Model(tf.keras.models.Model):
         guidance=config.guidance,
         sampler_name=method)
     samples = (samples / config.b_scale / 2. + 0.5)  # convert -s,s -> 0,1
-    return samples
+
+    if 'images' in kwargs and 'labels' in kwargs:
+      images = self.images2tokens(kwargs['images'])
+      images, noise, _, pred_dict = self.noise_denoise(
+          images, kwargs['labels'], time_step=None, training=False)
+      loss = self.compute_loss(images, noise, pred_dict)
+    else:
+      loss = tf.constant(-1.0, dtype=tf.float32)
+    return samples, loss
 
   def noise_denoise(self, images, labels, time_step=None, training=True):
     config = self.config
@@ -276,3 +298,95 @@ class Trainer(model_lib.Trainer):
       vars_src = [src_vars_dict[var.name] for var in vars_dst]
     for var_src, var_dst in zip(vars_src, vars_dst):
       var_dst.assign(var_dst * ema_decay + var_src * (1. - ema_decay))
+
+
+@model_lib.ModelRegistry.register('image_token_diffusion_model')
+class ModelT(Model):
+  """A model."""
+
+  def __init__(self, config: ml_collections.ConfigDict, **kwargs):
+    super(Model, self).__init__(**kwargs)
+    self.image_size = config.dataset.image_size
+    self.num_classes = config.dataset.num_classes
+    config = config.model
+    self.config = config
+    self.scheduler = diffusion_utils.Scheduler(config.train_schedule)
+    if config.x0_clip == 'auto':
+      self.x0_clip = '{},{}'.format(-config.b_scale, config.b_scale)
+    else:
+      self.x0_clip = config.x0_clip
+    self.num_groups = config.num_groups
+    s_num_groups = int(math.sqrt(self.num_groups))
+    self.sub_image_size = self.image_size // s_num_groups
+    self.x_size = (self.image_size // config.patch_size)**2
+    self.x_per_group = self.x_size // self.num_groups
+    self.channels = config.patch_size**2 * 3
+    if config.arch_name == 'fit':
+      m_kwargs = dict(
+          layers=config.num_layers,
+          x_size=self.x_size,
+          num_groups=config.num_groups,
+          latents_per_group=config.latent_slots//config.num_groups,
+          x_dim=config.tape_dim,
+          latent_dim=config.latent_dim,
+          x_num_heads=config.rw_num_heads,
+          latent_num_heads=config.latent_num_heads,
+          out_dim=self.channels,
+          mlp_ratio=config.latent_mlp_ratio,
+          drop_path=config.drop_path,
+          drop_units=config.drop_units,
+          drop_att=config.drop_att,
+          x_pos_encoding=config.tape_pos_encoding,
+          latent_pos_encoding=config.latent_pos_encoding,
+          mask='none',
+          cond_proj=True,
+          self_cond=config.self_cond,
+          x_self_attention=config.x_self_attention,
+          xattn_with_mlp=config.xattn_with_mlp,
+          xattn_enc_ln=config.xattn_enc_ln,
+          name=config.arch_name)
+      self.denoiser = FITDenoiser(**m_kwargs)
+      self.denoiser_ema = FITDenoiser(**m_kwargs, trainable=False)
+    else:
+      raise ValueError(f'Unknown architecture {config.arch_name}')
+    # Obtain hidden shapes for latent self conditioning.
+    # TODO(iamtingchen): better way to handle it.
+    self.hidden_shapes = getattr(self.denoiser, 'hidden_shapes', None)
+    if self.hidden_shapes is not None:  # latent self-cond
+      assert config.self_cond not in ['x', 'eps', 'auto']
+
+  @property
+  def sample_shape(self):
+    return [self.num_groups, self.x_per_group, self.channels]
+
+  def images2tokens(self, images):
+    return utils.images2subimages2tokens(
+        images,
+        [self.sub_image_size, self.sub_image_size],
+        [self.config.patch_size, self.config.patch_size])
+
+  def tokens2images(self, tokens):
+    return utils.tokens2subimages2images(
+        tokens,
+        [self.sub_image_size, self.sub_image_size],
+        [self.config.patch_size, self.config.patch_size],
+        [self.image_size, self.image_size])
+
+  def sample(self, num_samples=100, iterations=100, method='ddim', **kwargs):
+    samples, loss = super().sample(num_samples, iterations, method, **kwargs)
+    return self.tokens2images(samples), loss
+
+  def call(self,
+           images: tf.Tensor,
+           labels: tf.Tensor,
+           training: bool = True,
+           **kwargs)  -> tf.Tensor:  # pylint: disable=signature-mismatch
+    """Model inference call."""
+    with tf.name_scope(''):  # for other functions to have the same name scope
+      images = self.images2tokens(images)
+      images, noise, _, pred_dict = self.noise_denoise(
+          images, labels, None, training)
+      return self.compute_loss(images, noise, pred_dict)
+
+
+model_lib.TrainerRegistry.register('image_token_diffusion_model')(Trainer)
