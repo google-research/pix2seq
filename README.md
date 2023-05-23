@@ -12,7 +12,7 @@ This is the official implementation of Pix2Seq in Tensorflow 2 with efficient TP
 
 ## (<span style="color:red">NEW!</span>) FitTransformer (FIT)
 
-We added (official) implementations of FIT architecture (as an encoder, a diffusion decoder, or an autoregressive decoder) see architectures/transformers.py.
+We added (official) implementations of [FitTransformer (FIT)](https://arxiv.org/abs/2305.12689) (as an encoder, a diffusion decoder, or an autoregressive decoder) see architectures/transformers.py.
 
 ## (<span style="color:red">NEW!</span>) Diffusion models
 
@@ -233,13 +233,13 @@ Note: You can run eval on a subset of images by setting `--config.eval.steps`.
 }
 ```
 
-[FitTransformer (FIT) paper](https://arxiv.org/abs/2305.xx):
+[FitTransformer (FIT) paper](https://arxiv.org/abs/2305.12689):
 
 ```
 @article{chen2023fit,
   title={FIT: Far-reaching Interleaved Transformers},
   author={Chen, Ting and Li, Lala},
-  journal={arXiv preprint arXiv:2305.xx},
+  journal={arXiv preprint arXiv:2305.12689},
   year={2023}
 }
 ```
